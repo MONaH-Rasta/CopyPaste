@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb", "3.6.7", ResourceId = 716)]
+    [Info("Copy Paste", "Reneb", "3.6.8", ResourceId = 716)]
     [Description("Copy and paste buildings to save them or move them")]
 	
     public class CopyPaste : RustPlugin
@@ -27,6 +27,7 @@ namespace Oxide.Plugins
 				  , rayPaste 	= LayerMask.GetMask("Construction", "Deployed", "Tree", "Terrain", "World", "Water", "Prevent Building");
 
         private string copyPermission 		= "copypaste.copy" 
+					 , listPermission 		= "copypaste.list"
 					 , pastePermission 		= "copypaste.paste"
 					 , pastebackPermission 	= "copypaste.pasteback"
 					 , undoPermission 		= "copypaste.undo"
@@ -155,6 +156,7 @@ namespace Oxide.Plugins
         private void Init()
         {
             permission.RegisterPermission(copyPermission, this);
+			permission.RegisterPermission(listPermission, this);
             permission.RegisterPermission(pastePermission, this);
 			permission.RegisterPermission(pastebackPermission, this);
             permission.RegisterPermission(undoPermission, this);
@@ -1432,6 +1434,30 @@ namespace Oxide.Plugins
             SendReply(player, Lang("PASTE_SUCCESS", player.UserIDString));
         }
 
+		[ChatCommand("list")]
+        private void cmdChatList(BasePlayer player, string command, string[] args)
+        {
+            if (!HasAccess(player, listPermission))
+            {
+                SendReply(player, Lang("NO_ACCESS", player.UserIDString));
+                return;
+            }
+
+            string[] files = Interface.Oxide.DataFileSystem.GetFiles(subDirectory);
+            
+			List<string> fileList = new List<string>();
+			
+            foreach(string file in files)
+            {
+                string[] strFileParts = file.Split('/');
+                string justfile = strFileParts[strFileParts.Length - 1].Replace(".json", "");
+                fileList.Add(justfile);
+            }
+			
+            SendReply(player, Lang("AVAILABLE_STRUCTURES", player.UserIDString));
+            SendReply(player, string.Join(", ", fileList.ToArray()));
+        }
+		
         [ChatCommand("pasteback")]
         private void cmdChatPasteBack(BasePlayer player, string command, string[] args)
         {
@@ -1972,6 +1998,10 @@ namespace Oxide.Plugins
             {"BLOCKING_PASTE", new Dictionary<string, string>() {
                 {"en", "Something is blocking the paste"},
                 {"ru", "Что-то препятствует вставке"},
+            }},
+            {"AVAILABLE_STRUCTURES", new Dictionary<string, string>() {
+                {"en", "<color=orange>Доступные постройки:</color>"},
+                {"ru", "<color=orange>Available structures:</color>"},
             }},
         };
     }
