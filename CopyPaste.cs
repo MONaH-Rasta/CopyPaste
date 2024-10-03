@@ -22,7 +22,7 @@ using Debug = System.Diagnostics.Debug;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.8", ResourceId = 716)]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.9", ResourceId = 716)]
     [Description("Copy and paste buildings to save them or move them")]
 	
     public class CopyPaste : RustPlugin
@@ -218,7 +218,7 @@ namespace Oxide.Plugins
 
         #region API
 
-        private object TryCopyFromSteamID(ulong userID, string filename, string[] args)
+        private object TryCopyFromSteamID(ulong userID, string filename, string[] args, Action callback = null)
         {
             var player = BasePlayer.FindByID(userID);
 
@@ -230,10 +230,10 @@ namespace Oxide.Plugins
             if (!Physics.Raycast(player.eyes.HeadRay(), out hit, 1000f, rayCopy))
                 return Lang("NO_ENTITY_RAY", player.UserIDString);
 
-            return TryCopy(hit.point, hit.GetEntity().GetNetworkRotation().eulerAngles, filename, DegreeToRadian(player.GetNetworkRotation().eulerAngles.y), args, player);
+            return TryCopy(hit.point, hit.GetEntity().GetNetworkRotation().eulerAngles, filename, DegreeToRadian(player.GetNetworkRotation().eulerAngles.y), args, player, callback);
         }
 
-        private object TryPasteFromSteamID(ulong userID, string filename, string[] args)
+        private object TryPasteFromSteamID(ulong userID, string filename, string[] args, Action callback = null)
         {
             var player = BasePlayer.FindByID(userID);
 
@@ -245,12 +245,12 @@ namespace Oxide.Plugins
             if (!Physics.Raycast(player.eyes.HeadRay(), out hit, 1000f, rayPaste))
                 return Lang("NO_ENTITY_RAY", player.UserIDString);
 			
-            return TryPaste(hit.point, filename, player, DegreeToRadian(player.GetNetworkRotation().eulerAngles.y), args);
+            return TryPaste(hit.point, filename, player, DegreeToRadian(player.GetNetworkRotation().eulerAngles.y), args, callback: callback);
         }
 
-        private object TryPasteFromVector3(Vector3 pos, float rotationCorrection, string filename, string[] args)
+        private object TryPasteFromVector3(Vector3 pos, float rotationCorrection, string filename, string[] args, Action callback = null)
         {
-            return TryPaste(pos, filename, null, rotationCorrection, args);
+            return TryPaste(pos, filename, null, rotationCorrection, args, callback: callback);
         }
 
         #endregion
@@ -354,7 +354,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private void Copy(Vector3 sourcePos, Vector3 sourceRot, string filename, float RotationCorrection, CopyMechanics copyMechanics, float range, bool saveTree, bool saveShare, bool eachToEach, BasePlayer player)
+        private void Copy(Vector3 sourcePos, Vector3 sourceRot, string filename, float RotationCorrection, CopyMechanics copyMechanics, float range, bool saveTree, bool saveShare, bool eachToEach, BasePlayer player, Action callback)
         {
             int currentLayer = copyLayer;
 
@@ -373,7 +373,8 @@ namespace Oxide.Plugins
                 EachToEach = eachToEach,
                 SourcePos = sourcePos,
                 SourceRot = sourceRot,
-                Player = player
+                Player = player,
+                callback = callback
             };
 
             copyData.CheckFrom.Push(sourcePos);
@@ -460,6 +461,9 @@ namespace Oxide.Plugins
 
                 Interface.Oxide.DataFileSystem.SaveDatafile(path);
                 SendReply(copyData.Player, Lang("COPY_SUCCESS", copyData.Player.UserIDString, copyData.FileName));
+
+                copyData.callback?.Invoke();
+
                 Interface.CallHook("OnCopyFinished", copyData.RawData);
             }
         }
@@ -816,7 +820,7 @@ namespace Oxide.Plugins
             return transformedPos;
         }
 
-        private void Paste(ICollection<Dictionary<string, object>> entities, Dictionary<string, object> protocol, Vector3 startPos, BasePlayer player, bool stability, float RotationCorrection, float heightAdj, bool auth)
+        private void Paste(ICollection<Dictionary<string, object>> entities, Dictionary<string, object> protocol, Vector3 startPos, BasePlayer player, bool stability, float RotationCorrection, float heightAdj, bool auth, Action callback)
         {
 
             var ioEntities = new Dictionary<uint, Dictionary<string, object>>();
@@ -838,7 +842,8 @@ namespace Oxide.Plugins
                 QuaternionRotation = quaternionRotation,
                 StartPos = startPos,
                 Stability = stability,
-                Auth = auth
+                Auth = auth,
+                callback = callback
             };
 
             NextTick(() => PasteLoop(pasteData));
@@ -1371,6 +1376,8 @@ namespace Oxide.Plugins
 
                 lastPastes[player?.UserIDString ?? serverID].Push(pasteData.PastedEntities);
 
+                pasteData.callback?.Invoke();
+
                 Interface.CallHook("OnPasteFinished", pasteData.PastedEntities);
             }
         }
@@ -1406,7 +1413,7 @@ namespace Oxide.Plugins
             return preloaddata;
         }
 
-        private object TryCopy(Vector3 sourcePos, Vector3 sourceRot, string filename, float RotationCorrection, string[] args, BasePlayer player)
+        private object TryCopy(Vector3 sourcePos, Vector3 sourceRot, string filename, float RotationCorrection, string[] args, BasePlayer player, Action callback)
         {
             bool saveShare = config.Copy.Share, saveTree = config.Copy.Tree, eachToEach = config.Copy.EachToEach;
             CopyMechanics copyMechanics = CopyMechanics.Proximity;
@@ -1476,7 +1483,7 @@ namespace Oxide.Plugins
                 }
             }
 
-            Copy(sourcePos, sourceRot, filename, RotationCorrection, copyMechanics, radius, saveTree, saveShare, eachToEach, player);
+            Copy(sourcePos, sourceRot, filename, RotationCorrection, copyMechanics, radius, saveTree, saveShare, eachToEach, player, callback);
 
             return true;
         }
@@ -1545,7 +1552,7 @@ namespace Oxide.Plugins
             return flags;
         }
 
-        private object TryPaste(Vector3 startPos, string filename, BasePlayer player, float RotationCorrection, string[] args, bool autoHeight = true)
+        private object TryPaste(Vector3 startPos, string filename, BasePlayer player, float RotationCorrection, string[] args, bool autoHeight = true, Action callback = null)
         {
             var userID = player?.UserIDString;
 
@@ -1654,12 +1661,12 @@ namespace Oxide.Plugins
                 if (bestHeight is string)
                     return bestHeight;
 
-                var heightAdjBest = (float)bestHeight - startPos.y;
+                heightAdj += ((float)bestHeight - startPos.y);
 
                 foreach (var entity in preloadData)
                 {
                     var pos = ((Vector3)entity["position"]);
-                    pos.y += (heightAdjBest + heightAdj);
+                    pos.y += heightAdj;
 
                     entity["position"] = pos;
                 }
@@ -1678,7 +1685,7 @@ namespace Oxide.Plugins
 			if(data["protocol"] != null)
 				protocol = data["protocol"] as Dictionary<string, object>;
 
-            Paste(preloadData, protocol, startPos, player, stability, RotationCorrection, autoHeight ? heightAdj : 0, auth);
+            Paste(preloadData, protocol, startPos, player, stability, RotationCorrection, autoHeight ? heightAdj : 0, auth, callback);
             return true;
         }
 
@@ -2406,6 +2413,7 @@ namespace Oxide.Plugins
             public List<object> RawData = new List<object>();
             public Vector3 SourcePos;
             public Vector3 SourceRot;
+            public Action callback;
 
             public string FileName;
             public int CurrentLayer;
@@ -2431,6 +2439,7 @@ namespace Oxide.Plugins
             public BasePlayer Player;
             public List<StabilityEntity> StabilityEntities = new List<StabilityEntity>();
             public Quaternion QuaternionRotation;
+            public Action callback;
 
             public bool Auth;
             public Vector3 StartPos;
