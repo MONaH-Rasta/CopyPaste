@@ -23,7 +23,7 @@ using Debug = System.Diagnostics.Debug;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.12", ResourceId = 716)]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.13", ResourceId = 716)]
     [Description("Copy and paste buildings to save them or move them")]
 	
     public class CopyPaste : RustPlugin
@@ -252,8 +252,6 @@ namespace Oxide.Plugins
 
             if (!Physics.Raycast(player.eyes.HeadRay(), out hit, 1000f, rayPaste))
                 return Lang("NO_ENTITY_RAY", player.UserIDString);
-
-            SendReply(player, hit.point.ToString());
 			
             return TryPaste(hit.point, filename, player, DegreeToRadian(player.GetNetworkRotation().eulerAngles.y), args, callback: callback);
         }
@@ -896,6 +894,10 @@ namespace Oxide.Plugins
                     continue;
 
                 if (prefabname.Contains("pillar"))
+                    continue;
+
+                // Used to copy locks for no reason in previous versions (is included in the slots info so no need to copy locks) so just skipping them.
+                if (prefabname.Contains("locks"))
                     continue;
 
                 var entity = GameManager.server.CreateEntity(prefabname, pos, rot, true);
@@ -2372,78 +2374,140 @@ namespace Oxide.Plugins
             {"FILE_NOT_EXISTS", new Dictionary<string, string>() {
                 {"en", "File does not exist"},
                 {"ru", "Файл не существует"},
+                {"nl", "Bestand bestaat niet." }
             }},
             {"FILE_BROKEN", new Dictionary<string, string>() {
-                {"en", "File is broken, can not be paste"},
+                {"en", "Something went wrong during pasting because of a error in the file."},
                 {"ru", "Файл поврежден, вставка невозможна"},
+                {"nl", "Er is iets misgegaan tijdens het plakken door een beschadigd bestand." }
             }},
             {"NO_ACCESS", new Dictionary<string, string>() {
                 {"en", "You don't have the permissions to use this command"},
                 {"ru", "У вас нет прав доступа к данной команде"},
+                {"nl", "U heeft geen toestemming/permissie om dit commando te gebruiken." }
             }},
             {"SYNTAX_PASTEBACK", new Dictionary<string, string>() {
-                {"en", "Syntax: /pasteback <Target Filename> <options values>\nheight XX - Adjust the height\nvending - Information and sellings in vending machine"},
-                {"ru", "Синтаксис: /pasteback <Название Объекта> <опция значение>\nheight XX - Высота от земли\nvending - Информация и товары в торговом автомате"},
+                {"en", "Syntax: /pasteback <Target Filename> <options values>\n" +
+                       "height XX - Adjust the height\n" +
+                       "vending - Information and sellings in vending machine\n" +
+                       "stability <true/false> - Wether or not to disable stability\n" +
+                       "deployables <true/false> - Wether or not to copy deployables\n" +
+                       "auth <true/false> - Wether or not to copy lock and cupboard whitelists"},
+                {"ru", "Синтаксис: /pasteback <Название Объекта> <опция значение>\n" +
+                       "height XX - Высота от земли\n" +
+                       "vending - Информация и товары в торговом автомате"},
+                {"nl", "Syntax: /pasteback <Bestandsnaam> <opties waarden>\n" +
+                       "height XX - Pas de hoogte aan \n" +
+                       "vending <true/false> - Informatie en inventaris van \"vending machines\" kopiëren\n" +
+                       "stability <true/false> - of de stabiliteit van het gebouw uitgezet moet worden\n" +
+                       "deployables <true/false> - of de \"deployables\" gekopiërd moeten worden\n" +
+                       "auth <true/false> - Of authorisatie op sloten en tool cupboards gekopiërd moet worden" }
             }},
             {"SYNTAX_PASTE_OR_PASTEBACK", new Dictionary<string, string>() {
-                {"en", "Syntax: /paste or /pasteback <Target Filename> <options values>\nheight XX - Adjust the height\nautoheight true/false - sets best height, carefull of the steep\nblockcollision XX - blocks the entire paste if something the new building collides with something\ndeployables true/false - false to remove deployables\ninventories true/false - false to ignore inventories\nvending - Information and sellings in vending machine"},
-                {"ru", "Синтаксис: /paste or /pasteback <Название Объекта> <опция значение>\nheight XX - Высота от земли\nautoheight true/false - автоматически подобрать высоту от земли\nblockcollision XX - блокировать вставку, если что-то этому мешает\ndeployables true/false - false для удаления предметов\ninventories true/false - false для игнорирования копирования инвентаря\nvending - Информация и товары в торговом автомате"},
+                {"en", "Syntax: /paste or /pasteback <Target Filename> <options values>\n" +
+                       "height XX - Adjust the height\n" +
+                       "autoheight true/false - sets best height, carefull of the steep\n" +
+                       "blockcollision XX - blocks the entire paste if something the new building collides with something\n" +
+                       "deployables true/false - false to remove deployables\n" +
+                       "inventories true/false - false to ignore inventories\n" +
+                       "vending - Information and sellings in vending machine\n" +
+                       "stability <true/false> - Wether or not to disable stability on the building"},
+                {"ru", "Синтаксис: /paste or /pasteback <Название Объекта> <опция значение>\n" +
+                       "height XX - Высота от земли\n" +
+                       "autoheight true/false - автоматически подобрать высоту от земли\n" +
+                       "blockcollision XX - блокировать вставку, если что-то этому мешает\n" +
+                       "deployables true/false - false для удаления предметов\n" +
+                       "inventories true/false - false для игнорирования копирования инвентаря\n" +
+                       "vending - Информация и товары в торговом автомате"},
+                {"nl", "Syntax: /paste of /pasteback <Bestandsnaam> <opties waarden>\n" +
+                       "height XX - Pas de hoogte aan \n" +
+                       "autoheight true/false - probeert de optimale hoogte te vinden om gebouw te plaatsen. Werkt optimaal op vlakke grond.\n" +
+                       "vending true/false - Informatie en inventaris van \"vending machines\" kopiëren\n" +
+                       "stability <true/false> - of de stabiliteit van het gebouw uitgezet moet worden\n" +
+                       "deployables <true/false> - of de \"deployables\" gekopiërd moeten worden\n" +
+                       "auth <true/false> - Of authorisatie op sloten en tool cupboards gekopiërd moet worden" }
             }},
             {"PASTEBACK_SUCCESS", new Dictionary<string, string>() {
                 {"en", "You've successfully placed back the structure"},
                 {"ru", "Постройка успешно вставлена на старое место"},
+                {"nl", "Het gebouw is succesvol teruggeplaatst." }
             }},
             {"PASTE_SUCCESS", new Dictionary<string, string>() {
                 {"en", "You've successfully pasted the structure"},
                 {"ru", "Постройка успешно вставлена"},
+                {"nl", "Het gebouw is succesvol geplaatst." }
             }},
             {"SYNTAX_COPY", new Dictionary<string, string>() {
-                {"en", "Syntax: /copy <Target Filename> <options values>\n radius XX (default 3)\n method proximity/building (default proximity)\nbuilding true/false (saves structures or not)\ndeployables true/false (saves deployables or not)\ninventories true/false (saves inventories or not)"},
-                {"ru", "Синтаксис: /copy <Название Объекта> <опция значение>\n radius XX (default 3)\n method proximity/building (по умолчанию proximity)\nbuilding true/false (сохранять постройку или нет)\ndeployables true/false (сохранять предметы или нет)\ninventories true/false (сохранять инвентарь или нет)"},
+                {"en", "Syntax: /copy <Target Filename> <options values>\n" +
+                       "radius XX (default 3) - The radius in which to search for the next object (performs this search from every other object)\n" +
+                       "method proximity/building (default proximity) - Building only copies objects which are part of the building, proximity copies everything (within the radius)\n" +
+                       "deployables true/false (saves deployables or not) - Wether to save deployables\n" +
+                       "inventories true/false (saves inventories or not) - Wether to save inventories of found objects with inventories."},
+                {"ru", "Синтаксис: /copy <Название Объекта> <опция значение>\n" +
+                       "radius XX (default 3)\n" +
+                       "method proximity/building (по умолчанию proximity)\n" +
+                       "deployables true/false (сохранять предметы или нет)\n" +
+                       "inventories true/false (сохранять инвентарь или нет)"},
+                {"nl", "Syntax: /copy <Bestandsnaam> <opties waarden>\n" +
+                       "radius XX (standaard 3) - De radius waarin copy paste naar het volgende object zoekt\n" +
+                       "method proximity/building (standaard proximity) - Building kopieërd alleen objecten die bij het gebouw horen, proximity kopieërd alles wat gevonden is\n" +
+                       "deployables true/false (saves deployables or not) - Of de data van gevonden \"deployables\" opgeslagen moet worden\n" +
+                       "inventories true/false (saves inventories or not) - Of inventarissen van objecten (kisten, tool cupboards, etc) opgeslagen moet worden" }
             }},
             {"NO_ENTITY_RAY", new Dictionary<string, string>() {
                 {"en", "Couldn't ray something valid in front of you"},
                 {"ru", "Не удалось найти какой-либо объект перед вами"},
+                {"nl", "U kijkt niet naar een geschikt object om een kopie op te starten." }
             }},
             {"COPY_SUCCESS", new Dictionary<string, string>() {
                 {"en", "The structure was successfully copied as {0}"},
                 {"ru", "Постройка успешно скопирована под названием: {0}"},
+                {"nl", "Gebouw is succesvol gekopieërd" }
             }},
             {"NO_PASTED_STRUCTURE", new Dictionary<string, string>() {
                 {"en", "You must paste structure before undoing it"},
                 {"ru", "Вы должны вставить постройку перед тем, как отменить действие"},
+                {"nl", "U moet eerst een gebouw terugplaatsen alvorens deze ongedaan gemaakt kan worden (duhh)" }
             }},
             {"UNDO_SUCCESS", new Dictionary<string, string>() {
                 {"en", "You've successfully undid what you pasted"},
                 {"ru", "Вы успешно снесли вставленную постройку"},
+                {"nl", "Laatse geplaatste gebouw is succesvol ongedaan gemaakt." }
             }},
             {"NOT_FOUND_PLAYER", new Dictionary<string, string>() {
                 {"en", "Couldn't find the player"},
                 {"ru", "Не удалось найти игрока"},
+                {"nl", "Speler niet gevonden." }
             }},
             {"SYNTAX_BOOL", new Dictionary<string, string>() {
                 {"en", "Option {0} must be true/false"},
                 {"ru", "Опция {0} принимает значения true/false"},
+                {"nl", "Optie {0} moet true of false zijn" }
             }},
             {"SYNTAX_HEIGHT", new Dictionary<string, string>() {
                 {"en", "Option height must be a number"},
                 {"ru", "Опция height принимает только числовые значения"},
+                {"nl", "De optie height accepteert alleen nummers" }
             }},
             {"SYNTAX_BLOCKCOLLISION", new Dictionary<string, string>() {
                 {"en", "Option blockcollision must be a number, 0 will deactivate the option"},
                 {"ru", "Опция blockcollision принимает только числовые значения, 0 позволяет отключить проверку"},
+                {"nl", "Optie blockcollision accepteert alleen nummers, 0 schakelt deze functionaliteit uit" }
             }},
             {"SYNTAX_RADIUS", new Dictionary<string, string>() {
                 {"en", "Option radius must be a number"},
                 {"ru", "Опция radius принимает только числовые значения"},
+                {"nl", "Optie height accepteert alleen nummers" }
             }},
             {"BLOCKING_PASTE", new Dictionary<string, string>() {
                 {"en", "Something is blocking the paste"},
                 {"ru", "Что-то препятствует вставке"},
+                {"nl", "Iets blokkeert het plaatsen van dit gebouw" }
             }},
             {"AVAILABLE_STRUCTURES", new Dictionary<string, string>() {
                 {"ru", "<color=orange>Доступные постройки:</color>"},
                 {"en", "<color=orange>Available structures:</color>"},
+                {"nl", "Beschikbare bestanden om te plaatsen zijn:" }
             }},
         };
 
