@@ -22,7 +22,7 @@ using Debug = System.Diagnostics.Debug;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.7", ResourceId = 716)]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.8", ResourceId = 716)]
     [Description("Copy and paste buildings to save them or move them")]
 	
     public class CopyPaste : RustPlugin
@@ -216,7 +216,7 @@ namespace Oxide.Plugins
             };
         }
 
-        //API
+        #region API
 
         private object TryCopyFromSteamID(ulong userID, string filename, string[] args)
         {
@@ -253,6 +253,7 @@ namespace Oxide.Plugins
             return TryPaste(pos, filename, null, rotationCorrection, args);
         }
 
+        #endregion
         //Other methods
 
         private object CheckCollision(HashSet<Dictionary<string, object>> entities, Vector3 startPos, float radius)
@@ -353,9 +354,8 @@ namespace Oxide.Plugins
             }
         }
 
-        private object Copy(Vector3 sourcePos, Vector3 sourceRot, string filename, float RotationCorrection, CopyMechanics copyMechanics, float range, bool saveTree, bool saveShare, bool eachToEach, BasePlayer player)
+        private void Copy(Vector3 sourcePos, Vector3 sourceRot, string filename, float RotationCorrection, CopyMechanics copyMechanics, float range, bool saveTree, bool saveShare, bool eachToEach, BasePlayer player)
         {
-            List<object> rawData = new List<object>();
             int currentLayer = copyLayer;
 
             if (saveTree)
@@ -378,12 +378,10 @@ namespace Oxide.Plugins
 
             copyData.CheckFrom.Push(sourcePos);
 
-            CopyLoop(copyData);
-
-            return rawData;
+            NextTick(() => CopyLoop(copyData));;
         }
 
-        private object CopyLoop(CopyData copyData)
+        private void CopyLoop(CopyData copyData)
         {
             var checkFrom = copyData.CheckFrom;
             var houseList = copyData.HouseList;
@@ -462,9 +460,8 @@ namespace Oxide.Plugins
 
                 Interface.Oxide.DataFileSystem.SaveDatafile(path);
                 SendReply(copyData.Player, Lang("COPY_SUCCESS", copyData.Player.UserIDString, copyData.FileName));
+                Interface.CallHook("OnCopyFinished", copyData.RawData);
             }
-
-            return null;
         }
 
         private float DegreeToRadian(float angle)
@@ -819,12 +816,11 @@ namespace Oxide.Plugins
             return transformedPos;
         }
 
-        private List<BaseEntity> Paste(ICollection<Dictionary<string, object>> entities, Dictionary<string, object> protocol, Vector3 startPos, BasePlayer player, bool stability, float RotationCorrection, float heightAdj, bool auth)
+        private void Paste(ICollection<Dictionary<string, object>> entities, Dictionary<string, object> protocol, Vector3 startPos, BasePlayer player, bool stability, float RotationCorrection, float heightAdj, bool auth)
         {
 
             var ioEntities = new Dictionary<uint, Dictionary<string, object>>();
             uint buildingID = 0;
-            var pastedEntities = new List<BaseEntity>();
 			
 			//Settings
 			
@@ -845,9 +841,7 @@ namespace Oxide.Plugins
                 Auth = auth
             };
 
-            PasteLoop(pasteData);
-
-            return pastedEntities;
+            NextTick(() => PasteLoop(pasteData));
         }
 
         private void PasteLoop(PasteData pasteData)
@@ -1376,6 +1370,8 @@ namespace Oxide.Plugins
                     lastPastes[player?.UserIDString ?? serverID] = new Stack<List<BaseEntity>>();
 
                 lastPastes[player?.UserIDString ?? serverID].Push(pasteData.PastedEntities);
+
+                Interface.CallHook("OnPasteFinished", pasteData.PastedEntities);
             }
         }
 
@@ -1480,7 +1476,9 @@ namespace Oxide.Plugins
                 }
             }
 
-            return Copy(sourcePos, sourceRot, filename, RotationCorrection, copyMechanics, radius, saveTree, saveShare, eachToEach, player);
+            Copy(sourcePos, sourceRot, filename, RotationCorrection, copyMechanics, radius, saveTree, saveShare, eachToEach, player);
+
+            return true;
         }
 
         private void TryCopySlots(BaseEntity ent, IDictionary<string, object> housedata, bool saveShare)
@@ -1679,8 +1677,9 @@ namespace Oxide.Plugins
 			
 			if(data["protocol"] != null)
 				protocol = data["protocol"] as Dictionary<string, object>;
-			
-            return Paste(preloadData, protocol, startPos, player, stability, RotationCorrection, autoHeight ? heightAdj : 0, auth);
+
+            Paste(preloadData, protocol, startPos, player, stability, RotationCorrection, autoHeight ? heightAdj : 0, auth);
+            return true;
         }
 
         private List<BaseEntity> TryPasteSlots(BaseEntity ent, Dictionary<string, object> structure, PasteData pasteData)
