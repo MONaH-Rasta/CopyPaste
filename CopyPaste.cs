@@ -1,6 +1,4 @@
-﻿// Reference: System.Drawing
-
-//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
+﻿//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
 //#define DEBUG
 
 using Facepunch;
@@ -23,7 +21,7 @@ using Debug = System.Diagnostics.Debug;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.14", ResourceId = 716)]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake & misticos", "4.1.17")]
     [Description("Copy and paste buildings to save them or move them")]
 	
     public class CopyPaste : RustPlugin
@@ -277,13 +275,27 @@ namespace Oxide.Plugins
 
         private bool CheckPlaced(string prefabname, Vector3 pos, Quaternion rot)
         {
-            List<BaseEntity> ents = new List<BaseEntity>();
-            Vis.Entities<BaseEntity>(pos, 2f, ents);
+            const float maxDiff = 0.01f;
+            
+            var ents = new List<BaseEntity>();
+            Vis.Entities(pos, maxDiff, ents);
 
-            foreach (BaseEntity ent in ents)
+            foreach (var ent in ents)
             {
-                if (ent.PrefabName == prefabname && ent.transform.position == pos && ent.transform.rotation == rot)
-                    return true;
+                if (ent.PrefabName != prefabname)
+                    continue;
+                
+                if (Vector3.Distance(ent.transform.position, pos) > maxDiff)
+                {
+                    continue;
+                }
+                
+                if (Vector3.Distance(ent.transform.rotation.eulerAngles, rot.eulerAngles) > maxDiff)
+                {
+                    continue;
+                }
+
+                return true;
             }
 
             return false;
@@ -959,11 +971,6 @@ namespace Oxide.Plugins
 
                 if (box != null)
                 {
-                    Locker locker = box as Locker;
-
-                    if (locker != null)
-                        locker.equippingActive = true;
-
                     box.inventory.Clear();
 
                     var items = new List<object>();
@@ -1050,9 +1057,6 @@ namespace Oxide.Plugins
                             i.MoveToContainer(box.inventory, targetPos);
                         }
                     }
-
-                    if (locker != null)
-                        locker.equippingActive = false;
                 }
 
                 var sign = entity as Signage;
