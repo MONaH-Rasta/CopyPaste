@@ -1,5 +1,5 @@
-//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
-//#define DEBUG
+﻿//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
+// #define DEBUG
 
 using System;
 using System.Collections.Generic;
@@ -34,7 +34,7 @@ using Graphics = System.Drawing.Graphics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.1.33")]
+    [Info("Copy Paste", "misticos", "4.1.34")]
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : CovalencePlugin
     {
@@ -1073,6 +1073,9 @@ namespace Oxide.Plugins
                 var ownerId = pasteData.BasePlayer?.userID ?? 0;
                 if (data.ContainsKey("ownerid"))
                 {
+#if DEBUG
+                    Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1077");
+#endif
                     ownerId = Convert.ToUInt64(data["ownerid"]);
                 }
 
@@ -1298,6 +1301,9 @@ namespace Oxide.Plugins
 
                     if (data.ContainsKey("autoturret"))
                     {
+#if DEBUG
+                        Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1305");
+#endif
                         var autoTurretData = data["autoturret"] as Dictionary<string, object>;
                         authorizedPlayers = (autoTurretData["authorizedPlayers"] as List<object>)
                             .Select(Convert.ToUInt64).ToList();
@@ -1311,7 +1317,7 @@ namespace Oxide.Plugins
                     {
                         autoTurret.authorizedPlayers.Add(new PlayerNameID
                         {
-                            userid = Convert.ToUInt64(userId),
+                            userid = userId,
                             username = "Player"
                         });
                     }
@@ -1511,6 +1517,9 @@ namespace Oxide.Plugins
 
                     if (data.ContainsKey("cupboard"))
                     {
+#if DEBUG
+                        Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1521");
+#endif
                         var cupboardData = data["cupboard"] as Dictionary<string, object>;
                         authorizedPlayers = (cupboardData["authorizedPlayers"] as List<object>).Select(Convert.ToUInt64)
                             .ToList();
@@ -1524,7 +1533,7 @@ namespace Oxide.Plugins
                     {
                         cupboard.authorizedPlayers.Add(new PlayerNameID
                         {
-                            userid = Convert.ToUInt64(userId),
+                            userid = userId,
                             username = "Player"
                         });
                     }
@@ -1601,7 +1610,7 @@ namespace Oxide.Plugins
                     }
 
                     ioData.Add("entity", ioEntity);
-                    ioData.Add("newId", ioEntity.net.ID);
+                    ioData.Add("newId", ioEntity.net.ID.Value);
 
                     object oldIdObject;
                     if (ioData.TryGetValue("oldID", out oldIdObject))
@@ -1706,8 +1715,11 @@ namespace Oxide.Plugins
                                 var ioConnection = pasteData.IoEntities[oldId];
                                 if (ioConnection.ContainsKey("newId"))
                                 {
+#if DEBUG
+                    Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1719");
+#endif
                                     ioEntity.inputs[index].connectedTo.entityRef.uid =
-                                        Convert.ToUInt32(ioConnection["newId"]);
+                                        new NetworkableId(Convert.ToUInt64(ioConnection["newId"]));
                                 }
                             }
                         }
@@ -2190,6 +2202,9 @@ namespace Oxide.Plugins
                         {
                             foreach (var userId in (List<object>)slotData["whitelistPlayers"])
                             {
+#if DEBUG
+                                Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 2206");
+#endif
                                 codeLock.whitelistPlayers.Add(Convert.ToUInt64(userId));
                             }
                         }
@@ -2205,6 +2220,9 @@ namespace Oxide.Plugins
                             {
                                 foreach (var userId in (List<object>)slotData["guestPlayers"])
                                 {
+#if DEBUG
+                                    Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 2224");
+#endif
                                     codeLock.guestPlayers.Add(Convert.ToUInt64(userId));
                                 }
                             }
@@ -2227,6 +2245,9 @@ namespace Oxide.Plugins
 
                     if (pasteData.Ownership && slotData.ContainsKey("ownerId"))
                     {
+#if DEBUG
+                        Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 2249");
+#endif
                         keyLock.OwnerID = Convert.ToUInt64(slotData["ownerId"]);
                     }
                 }
