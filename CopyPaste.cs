@@ -1,4 +1,4 @@
-﻿//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
+//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
 //#define DEBUG
 
 using System;
@@ -28,7 +28,7 @@ using Graphics = System.Drawing.Graphics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake & misticos", "4.1.22")]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake & misticos", "4.1.23")]
     [Description("Copy and paste buildings to save them or move them")]
 
     public class CopyPaste : RustPlugin
@@ -740,6 +740,18 @@ namespace Oxide.Plugins
                     });
                 }
             }
+            
+            var cctvRC = entity as CCTV_RC;
+            
+            if (cctvRC != null)
+            {
+                data.Add("cctv", new Dictionary<string, object>
+                {
+                        {"yaw", cctvRC.yawAmount},
+                        {"pitch", cctvRC.pitchAmount},
+                        {"rcIdentifier", cctvRC.rcIdentifier}
+                });
+            }
 
             var vendingMachine = entity as VendingMachine;
 
@@ -1332,6 +1344,17 @@ namespace Oxide.Plugins
                     }
 
                     cupboard.SendNetworkUpdate();
+                }
+                
+                var cctv_RC = entity as CCTV_RC;
+
+                if (cctv_RC != null && data.ContainsKey("cctv"))
+                {
+                    var cctv = (Dictionary<string, object>)data["cctv"];
+                    cctv_RC.yawAmount = Convert.ToSingle(cctv["yaw"]);
+                    cctv_RC.pitchAmount = Convert.ToSingle(cctv["pitch"]);
+                    cctv_RC.rcIdentifier = cctv["rcIdentifier"].ToString();
+                    cctv_RC.SendNetworkUpdate(BasePlayer.NetworkQueue.Update);
                 }
 
                 var vendingMachine = entity as VendingMachine;
@@ -1947,7 +1970,7 @@ namespace Oxide.Plugins
 
                 slotEntity.gameObject.Identity();
                 slotEntity.SetParent(ent, slotName);
-                slotEntity.OnDeployed(ent);
+                slotEntity.OnDeployed(ent, null);
                 slotEntity.Spawn();
 
                 ent.SetSlot(slot, slotEntity);
