@@ -13,6 +13,7 @@ using Facepunch;
 using Newtonsoft.Json;
 using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
+using Oxide.Game.Rust.Libraries.Covalence;
 using ProtoBuf;
 using UnityEngine;
 using Graphics = System.Drawing.Graphics;
@@ -32,12 +33,13 @@ using Graphics = System.Drawing.Graphics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.1.29")] // Wulf skipped 24 :(
+    [Info("Copy Paste", "misticos", "4.1.30")] // Wulf skipped 24 :(
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : CovalencePlugin
     {
         // ReSharper disable once Unity.IncorrectMonoBehaviourInstantiation
         private readonly Item _emptyItem = new Item { info = new ItemDefinition() };
+        private readonly IPlayer _consolePlayer = new RustConsolePlayer();
 
         private int _copyLayer =
                 LayerMask.GetMask("Construction", "Prevent Building", "Construction Trigger", "Trigger", "Deployed",
@@ -286,7 +288,7 @@ namespace Oxide.Plugins
         private object TryPasteFromVector3(Vector3 pos, float rotationCorrection, string filename, string[] args,
             Action callback = null)
         {
-            return TryPaste(pos, filename, null, rotationCorrection, args, callback: callback);
+            return TryPaste(pos, filename, _consolePlayer, rotationCorrection, args, callback: callback);
         }
 
         #endregion
