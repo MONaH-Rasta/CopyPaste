@@ -28,12 +28,13 @@ using Graphics = System.Drawing.Graphics;
  * bsdinis - Wire fix
  * nivex - Ownership option, sign fix
  * DezLife - CCTV fix
+ * Wulf - Skipping 4.1.24 :D
  * 
  */
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.1.30")] // Wulf skipped 24 :(
+    [Info("Copy Paste", "misticos", "4.1.31")]
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : CovalencePlugin
     {
@@ -887,7 +888,8 @@ namespace Oxide.Plugins
 
             foreach (var entity in entities)
             {
-                if (((string)entity["prefabname"]).Contains("/foundation/"))
+                var prefab = (string)entity["prefabname"];
+                if (prefab.Contains("/foundation/") || prefab.Contains("/foundation.triangle/"))
                 {
                     var foundHeight = GetGround((Vector3)entity["position"]);
 
