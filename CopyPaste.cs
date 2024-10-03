@@ -1,7 +1,7 @@
 ﻿// Reference: System.Drawing
 
 //If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
-//#define DEBUG
+#define DEBUG
 
 using Facepunch;
 using Graphics = System.Drawing.Graphics;
@@ -21,7 +21,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.4", ResourceId = 716)]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.6", ResourceId = 716)]
     [Description("Copy and paste buildings to save them or move them")]
 	
     public class CopyPaste : RustPlugin
@@ -38,10 +38,6 @@ namespace Oxide.Plugins
 					 , undoPermission 		= "copypaste.undo"
 					 , serverID 			= "Server"
 					 , subDirectory 		= "copypaste/";
-
-        private const int CopyBatchSize = 250;
-        private const int PasteBatchSize = 100;
-        private const int UndoBatchSize = 50;
 
         private Dictionary<string, Stack<List<BaseEntity>>> lastPastes = new Dictionary<string, Stack<List<BaseEntity>>>();
 
@@ -100,6 +96,18 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Paste Options")]
             public PasteOptions Paste { get; set; }
+
+            [JsonProperty(PropertyName = "Amount of entities to paste per batch. Use to tweak performance impact of pasting")]
+            [DefaultValue(15)]
+            public int PasteBatchSize = 15;
+
+            [JsonProperty(PropertyName = "Amount of entities to copy per batch. Use to tweak performance impact of copying")]
+            [DefaultValue(100)]
+            public int CopyBatchSize = 100;
+
+            [JsonProperty(PropertyName = "Amount of entities to undo per batch. Use to tweak performance impact of undoing")]
+            [DefaultValue(15)]
+            public int UndoBatchSize = 15;
 
             public class CopyOptions
             {
@@ -298,11 +306,19 @@ namespace Oxide.Plugins
         {
 
             entities
-                .Take(UndoBatchSize)
+                .Take(config.UndoBatchSize)
                 .ToList()
                 .ForEach(p =>
             {
                 entities.Remove(p);
+
+                // Cleanup the hotspot beloning to the node.
+                var ore = p as OreResourceEntity;
+                if (ore != null)
+                {
+                    ore.CleanupBonus();
+                }
+
                 if (p != null && !p.IsDestroyed)
                     p.Kill();
             });
@@ -367,7 +383,7 @@ namespace Oxide.Plugins
             var houseList = copyData.HouseList;
             var buildingID = copyData.BuildingID;
             var copyMechanics = copyData.CopyMechanics;
-            var batchSize = checkFrom.Count < CopyBatchSize ? checkFrom.Count : CopyBatchSize;
+            var batchSize = checkFrom.Count < config.CopyBatchSize ? checkFrom.Count : config.CopyBatchSize;
 
             for(int i = 0; i < batchSize; i++)
             {
@@ -399,8 +415,7 @@ namespace Oxide.Plugins
                     if (copyData.EachToEach)
                         checkFrom.Push(entity.transform.position);
 
-                    copyData.RawData.Add(EntityData(entity, copyData.SourcePos, copyData.SourceRot, entity.transform.position,
-                        entity.transform.rotation.eulerAngles / 57.29578f, copyData.RotCor, copyData.SaveShare));
+                    copyData.RawData.Add(EntityData(entity, entity.transform.position, entity.transform.rotation.eulerAngles / 57.29578f, copyData));
                 }
 
                 copyData.BuildingID = buildingID;
@@ -451,11 +466,11 @@ namespace Oxide.Plugins
 		   return (float)(Math.PI * angle / 180.0f);
 		}
 		
-        private Dictionary<string, object> EntityData(BaseEntity entity, Vector3 sourcePos, Vector3 sourceRot, Vector3 entPos, Vector3 entRot, float diffRot, bool saveShare)
+        private Dictionary<string, object> EntityData(BaseEntity entity, Vector3 entPos, Vector3 entRot, CopyData copyData)
         {
-            var normalizedPos = NormalizePosition(sourcePos, entPos, diffRot);
+            var normalizedPos = NormalizePosition(copyData.SourcePos, entPos, copyData.RotCor);
 
-            entRot.y -= diffRot;
+            entRot.y -= copyData.RotCor;
 
             var data = new Dictionary<string, object>
             {
@@ -478,7 +493,7 @@ namespace Oxide.Plugins
                 }
             };
 
-            TryCopySlots(entity, data, saveShare);
+            TryCopySlots(entity, data, copyData.SaveShare);
 
             var buildingblock = entity.GetComponentInParent<BuildingBlock>();
 
@@ -565,7 +580,7 @@ namespace Oxide.Plugins
                     ((Dictionary<string, object>)data["sign"]).Add("texture", Convert.ToBase64String(imageByte));
             }
 
-            if (saveShare)
+            if (copyData.SaveShare)
             {
                 var sleepingBag = entity.GetComponentInParent<SleepingBag>();
 
@@ -651,7 +666,7 @@ namespace Oxide.Plugins
                         // Since Vector3 is struct should be able to simply save the Vecot directly.
                         foreach (Vector3 linePoint in output.linePoints)
                         {
-                            linePoints.Add(NormalizePosition(sourcePos, linePoint, diffRot));
+                            linePoints.Add(NormalizePosition(copyData.SourcePos, linePoint, copyData.RotCor));
                         }
                     }
                     ioConnection.Add("linePoints", linePoints);
@@ -787,7 +802,7 @@ namespace Oxide.Plugins
             return transformedPos;
         }
 
-        private List<BaseEntity> Paste(ICollection<Dictionary<string, object>> entities, Dictionary<string, object> protocol, Vector3 startPos, BasePlayer player, bool stability, float RotationCorrection, float heightAdj)
+        private List<BaseEntity> Paste(ICollection<Dictionary<string, object>> entities, Dictionary<string, object> protocol, Vector3 startPos, BasePlayer player, bool stability, float RotationCorrection, float heightAdj, bool auth)
         {
 
             var ioEntities = new Dictionary<uint, Dictionary<string, object>>();
@@ -810,9 +825,8 @@ namespace Oxide.Plugins
                 QuaternionRotation = quaternionRotation,
                 StartPos = startPos,
                 Stability = stability,
+                Auth = auth
             };
-
-
 
             PasteLoop(pasteData);
 
@@ -822,7 +836,7 @@ namespace Oxide.Plugins
         private void PasteLoop(PasteData pasteData)
         {
             var entities = pasteData.Entities;
-            var todo = entities.Take(PasteBatchSize).ToArray();
+            var todo = entities.Take(config.PasteBatchSize).ToArray();
             var player = pasteData.Player;
 
             foreach (var data in todo)
@@ -893,7 +907,7 @@ namespace Oxide.Plugins
                 if (baseCombat != null)
                     baseCombat.ChangeHealth(baseCombat.MaxHealth());
 
-                pasteData.PastedEntities.AddRange(TryPasteSlots(entity, data));
+                pasteData.PastedEntities.AddRange(TryPasteSlots(entity, data, pasteData));
 
                 var box = entity as StorageContainer;
 
@@ -1029,7 +1043,7 @@ namespace Oxide.Plugins
 
                 if (autoturret != null)
                 {
-                    if (player != null)
+                    if (player != null && pasteData.Auth)
                     {
                         autoturret.authorizedPlayers.Add(new PlayerNameID()
                         {
@@ -1053,7 +1067,7 @@ namespace Oxide.Plugins
                         authorizedPlayers = (cupboardData["authorizedPlayers"] as List<object>).Select(y => Convert.ToUInt64(y)).ToList();
                     }
 
-                    if (data.ContainsKey("auth") && player != null && !authorizedPlayers.Contains(player.userID))
+                    if (pasteData.Auth)
                         authorizedPlayers.Add(player.userID);
 
                     foreach (var userID in authorizedPlayers)
@@ -1306,14 +1320,14 @@ namespace Oxide.Plugins
                     }
                 });
 
-                    foreach (var entity in pasteData.StabilityEntities)
-                    {
-                        entity.grounded = false;
-                        entity.InitializeSupports();
-                        entity.UpdateStability();
-                    }
+                foreach (var entity in pasteData.StabilityEntities)
+                {
+                    entity.grounded = false;
+                    entity.InitializeSupports();
+                    entity.UpdateStability();
+                }
 
-                    if (player != null)
+                if (player != null)
                 {
                     SendReply(player, Lang("PASTE_SUCCESS", player.UserIDString));
 #if DEBUG
@@ -1353,9 +1367,6 @@ namespace Oxide.Plugins
 
                 if (!inventories && data.ContainsKey("items"))
                     data["items"] = new List<object>();
-
-                if (auth && data["prefabname"].ToString().Contains("cupboard.tool"))
-                    data["auth"] = true;
 
                 if (!vending && data["prefabname"].ToString().Contains("vendingmachine"))
                     data.Remove("vendingmachine");
@@ -1625,10 +1636,10 @@ namespace Oxide.Plugins
 			if(data["protocol"] != null)
 				protocol = data["protocol"] as Dictionary<string, object>;
 			
-            return Paste(preloadData, protocol, startPos, player, stability, RotationCorrection, autoHeight ? heightAdj : 0);
+            return Paste(preloadData, protocol, startPos, player, stability, RotationCorrection, autoHeight ? heightAdj : 0, auth);
         }
 
-        private List<BaseEntity> TryPasteSlots(BaseEntity ent, Dictionary<string, object> structure)
+        private List<BaseEntity> TryPasteSlots(BaseEntity ent, Dictionary<string, object> structure, PasteData pasteData)
         {
             List<BaseEntity> entitySlots = new List<BaseEntity>();
 
@@ -1666,6 +1677,9 @@ namespace Oxide.Plugins
                         CodeLock codeLock = slotEntity.GetComponent<CodeLock>();
                         codeLock.code = code;
                         codeLock.hasCode = true;
+
+                        if (pasteData.Auth && pasteData.Player != null)
+                            codeLock.whitelistPlayers.Add(pasteData.Player.userID);
 
                         if (slotData.ContainsKey("whitelistPlayers"))
                         {
@@ -2375,6 +2389,7 @@ namespace Oxide.Plugins
             public List<StabilityEntity> StabilityEntities = new List<StabilityEntity>();
             public Quaternion QuaternionRotation;
 
+            public bool Auth;
             public Vector3 StartPos;
             public float HeightAdj;
             public bool Stability;
