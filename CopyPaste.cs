@@ -23,7 +23,7 @@ using Debug = System.Diagnostics.Debug;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.13", ResourceId = 716)]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.14", ResourceId = 716)]
     [Description("Copy and paste buildings to save them or move them")]
 	
     public class CopyPaste : RustPlugin
@@ -1270,8 +1270,8 @@ namespace Oxide.Plugins
                     {
                         rfBroadcaster.frequency = Convert.ToInt32(ioData["frequency"]);
                     }
-
-                    var rfReceiver = ioEntity as RFBroadcaster;
+                    
+                    var rfReceiver = ioEntity as RFReceiver;
                     if (rfReceiver != null && ioData.ContainsKey("frequency"))
                     {
                         rfReceiver.frequency = Convert.ToInt32(ioData["frequency"]);
