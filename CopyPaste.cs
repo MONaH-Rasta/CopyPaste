@@ -15,6 +15,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using UnityEngine;
@@ -22,7 +23,7 @@ using Debug = System.Diagnostics.Debug;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.11", ResourceId = 716)]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.12", ResourceId = 716)]
     [Description("Copy and paste buildings to save them or move them")]
 	
     public class CopyPaste : RustPlugin
@@ -158,7 +159,6 @@ namespace Oxide.Plugins
                 [JsonProperty(PropertyName = "EntityOwner (true/false)")]
                 [DefaultValue(true)]
                 public bool EntityOwner { get; set; } = true;
-
             }
         }
 
@@ -231,7 +231,7 @@ namespace Oxide.Plugins
             var player = BasePlayer.FindByID(userID);
 
             if (player == null)
-                return Lang("NOT_FOUND_PLAYER", player.UserIDString);
+                return Lang("NOT_FOUND_PLAYER", userID.ToString());
 
             RaycastHit hit;
 
@@ -322,6 +322,12 @@ namespace Oxide.Plugins
         private void UndoLoop(HashSet<BaseEntity> entities, BasePlayer player, int count = 0)
         {
 
+            foreach (var storageContainer in entities.OfType<StorageContainer>())
+            {
+                storageContainer.Kill();
+            }
+
+            // Take an amount of entities from the entity list (defined in config) and kill them. Will be repeated for every tick until there are no entities left.
             entities
                 .Take(config.UndoBatchSize)
                 .ToList()
@@ -364,7 +370,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private void Copy(Vector3 sourcePos, Vector3 sourceRot, string filename, float RotationCorrection, CopyMechanics copyMechanics, float range, bool saveTree, bool saveShare, bool eachToEach, BasePlayer player, Action callback)
+        private void Copy(Vector3 sourcePos, Vector3 sourceRot, string filename, float rotationCorrection, CopyMechanics copyMechanics, float range, bool saveTree, bool saveShare, bool eachToEach, BasePlayer player, Action callback)
         {
             int currentLayer = copyLayer;
 
@@ -375,7 +381,7 @@ namespace Oxide.Plugins
             {
                 FileName = filename,
                 CurrentLayer = currentLayer,
-                RotCor = RotationCorrection,
+                RotCor = rotationCorrection,
                 Range = range,
                 SaveShare = saveShare,
                 SaveTree = saveTree,
@@ -392,6 +398,7 @@ namespace Oxide.Plugins
             NextTick(() => CopyLoop(copyData));;
         }
 
+        // Main loop for copy, will fetch all the data needed. Is called every tick untill copy is done (can't find any entities)
         private void CopyLoop(CopyData copyData)
         {
             var checkFrom = copyData.CheckFrom;
