@@ -1,4 +1,4 @@
-﻿//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
+//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
 //#define DEBUG
 
 using Facepunch;
@@ -21,7 +21,7 @@ using Debug = System.Diagnostics.Debug;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake & misticos", "4.1.17")]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake & misticos & Orange", "4.1.18")]
     [Description("Copy and paste buildings to save them or move them")]
 	
     public class CopyPaste : RustPlugin
@@ -540,12 +540,73 @@ namespace Oxide.Plugins
             }
 
             var box = entity as StorageContainer;
-
             if (box != null)
             {
                 var itemlist = new List<object>();
 
                 foreach (Item item in box.inventory.itemList)
+                {
+                    var itemdata = new Dictionary<string, object>
+                    {
+                        { "condition", item.condition.ToString() },
+                        { "id", item.info.itemid },
+                        { "amount", item.amount },
+                        { "skinid", item.skin },
+                        { "position", item.position },
+                        { "blueprintTarget", item.blueprintTarget },
+                    };
+
+                    if (!string.IsNullOrEmpty(item.text))
+                        itemdata["text"] = item.text;
+
+                    var heldEnt = item.GetHeldEntity();
+
+                    if (heldEnt != null)
+                    {
+                        var projectiles = heldEnt.GetComponent<BaseProjectile>();
+
+                        if (projectiles != null)
+                        {
+                            var magazine = projectiles.primaryMagazine;
+
+                            if (magazine != null)
+                            {
+                                itemdata.Add("magazine", new Dictionary<string, object>
+                                {
+                                    { magazine.ammoType.itemid.ToString(), magazine.contents }
+                                });
+                            }
+                        }
+                    }
+
+                    if (item?.contents?.itemList != null)
+                    {
+                        var contents = new List<object>();
+
+                        foreach (Item itemContains in item.contents.itemList)
+                        {
+                            contents.Add(new Dictionary<string, object>
+                            {
+                                {"id", itemContains.info.itemid },
+                                {"amount", itemContains.amount },
+                            });
+                        }
+
+                        itemdata["items"] = contents;
+                    }
+
+                    itemlist.Add(itemdata);
+                }
+
+                data.Add("items", itemlist);
+            }
+            
+            var box2 = entity as ContainerIOEntity;
+            if (box2 != null)
+            {
+                var itemlist = new List<object>();
+
+                foreach (Item item in box2.inventory.itemList)
                 {
                     var itemdata = new Dictionary<string, object>
                     {
@@ -968,7 +1029,6 @@ namespace Oxide.Plugins
                 pasteData.PastedEntities.AddRange(TryPasteSlots(entity, data, pasteData));
 
                 var box = entity as StorageContainer;
-
                 if (box != null)
                 {
                     box.inventory.Clear();
@@ -1055,6 +1115,97 @@ namespace Oxide.Plugins
                                 targetPos = Convert.ToInt32(item["position"]);
 
                             i.MoveToContainer(box.inventory, targetPos);
+                        }
+                    }
+                }
+                
+                var box2 = entity as ContainerIOEntity;
+                if (box2 != null)
+                {
+                    box2.inventory.Clear();
+
+                    var items = new List<object>();
+
+                    if (data.ContainsKey("items"))
+                        items = data["items"] as List<object>;
+
+                    foreach (var itemDef in items)
+                    {
+                        var item = itemDef as Dictionary<string, object>;
+                        var itemid = Convert.ToInt32(item["id"]);
+                        var itemamount = Convert.ToInt32(item["amount"]);
+                        var itemskin = ulong.Parse(item["skinid"].ToString());
+                        var itemcondition = Convert.ToSingle(item["condition"]);
+
+                        if (pasteData.IsItemReplace)
+                            itemid = GetItemID(itemid);
+
+                        var i = ItemManager.CreateByItemID(itemid, itemamount, itemskin);
+
+                        if (i != null)
+                        {
+                            i.condition = itemcondition;
+
+                            if (item.ContainsKey("text"))
+                                i.text = item["text"].ToString();
+
+                            if (item.ContainsKey("blueprintTarget"))
+                            {
+                                int blueprintTarget = Convert.ToInt32(item["blueprintTarget"]);
+
+                                if (pasteData.IsItemReplace)
+                                    blueprintTarget = GetItemID(blueprintTarget);
+
+                                i.blueprintTarget = blueprintTarget;
+                            }
+                            if (item.ContainsKey("magazine"))
+                            {
+                                var heldent = i.GetHeldEntity();
+
+                                if (heldent != null)
+                                {
+                                    var projectiles = heldent.GetComponent<BaseProjectile>();
+
+                                    if (projectiles != null)
+                                    {
+                                        var magazine = item["magazine"] as Dictionary<string, object>;
+                                        var ammotype = int.Parse(magazine.Keys.ToArray()[0]);
+                                        var ammoamount = int.Parse(magazine[ammotype.ToString()].ToString());
+
+                                        if (pasteData.IsItemReplace)
+                                            ammotype = GetItemID(ammotype);
+
+                                        projectiles.primaryMagazine.ammoType = ItemManager.FindItemDefinition(ammotype);
+                                        projectiles.primaryMagazine.contents = ammoamount;
+                                    }
+
+                                    //TODO Doesn't add water to some containers
+
+                                    if (item.ContainsKey("items"))
+                                    {
+                                        var itemContainsList = item["items"] as List<object>;
+
+                                        foreach (var itemContains in itemContainsList)
+                                        {
+                                            var contents = itemContains as Dictionary<string, object>;
+
+                                            int contentsItemID = Convert.ToInt32(contents["id"]);
+
+                                            if (pasteData.IsItemReplace)
+                                                contentsItemID = GetItemID(contentsItemID);
+
+                                            i.contents.AddItem(ItemManager.FindItemDefinition(contentsItemID), Convert.ToInt32(contents["amount"]));
+                                        }
+                                    }
+                                }
+                            }
+
+                            int targetPos = -1;
+
+                            if (item.ContainsKey("position"))
+                                targetPos = Convert.ToInt32(item["position"]);
+
+                            i.MoveToContainer(box2.inventory, targetPos);
                         }
                     }
                 }
