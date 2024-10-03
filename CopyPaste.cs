@@ -34,7 +34,7 @@ using Graphics = System.Drawing.Graphics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.1.37")]
+    [Info("Copy Paste", "misticos", "4.1.38")]
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : CovalencePlugin
     {
@@ -458,6 +458,10 @@ namespace Oxide.Plugins
 
                     foreach (var entity in list)
                     {
+                        // Skip metal detector flags
+                        if (entity.GetComponent<MetalDetectorSource>() != null)
+                            continue;
+                        
                         if (!houseList.Add(entity))
                             continue;
 
@@ -481,7 +485,7 @@ namespace Oxide.Plugins
 
                         if (entity.GetComponent<BaseLock>() != null)
                             continue;
-
+                        
                         copyData.RawData.Add(EntityData(entity, transform.position,
                             transform.rotation.eulerAngles / 57.29578f, copyData));
                     }
@@ -1312,6 +1316,14 @@ namespace Oxide.Plugins
                             if (item.ContainsKey("position"))
                                 targetPos = Convert.ToInt32(item["position"]);
 
+                            var heldEntity = i.GetHeldEntity();
+                            if (heldEntity != null && heldEntity is Detonator detonator)
+                            {
+                                detonator.frequency = dataInt;
+                                if ( detonator.IsOn() )
+                                    RFManager.AddBroadcaster(detonator.frequency, detonator);
+                            }
+                            
                             i.position = targetPos;
                             box.inventory.Insert(i);
                         }
@@ -1707,22 +1719,29 @@ namespace Oxide.Plugins
                             0);
                     }
 
-                    var timer = ioEntity as TimerSwitch;
-                    if (timer != null && ioData.ContainsKey("timerLength"))
+                    var timerSwitch = ioEntity as TimerSwitch;
+                    if (timerSwitch != null && ioData.ContainsKey("timerLength"))
                     {
-                        timer.timerLength = Convert.ToInt32(ioData["timerLength"]);
+                        timerSwitch.timerLength = Convert.ToSingle(ioData["timerLength"]);
                     }
 
                     var rfBroadcaster = ioEntity as RFBroadcaster;
                     if (rfBroadcaster != null && ioData.ContainsKey("frequency"))
                     {
-                        rfBroadcaster.frequency = Convert.ToInt32(ioData["frequency"]);
+                        int newFrequency = Convert.ToInt32(ioData["frequency"]);
+                        if (ioEntity.IsPowered())
+                            RFManager.AddBroadcaster(newFrequency, rfBroadcaster);
+                        rfBroadcaster.frequency = newFrequency;
+                        rfBroadcaster.MarkDirty();
                     }
 
                     var rfReceiver = ioEntity as RFReceiver;
                     if (rfReceiver != null && ioData.ContainsKey("frequency"))
                     {
-                        rfReceiver.frequency = Convert.ToInt32(ioData["frequency"]);
+                        int newFrequency = Convert.ToInt32(ioData["frequency"]);
+                        RFManager.AddListener(newFrequency, rfReceiver);
+                        rfReceiver.frequency = newFrequency;
+                        rfReceiver.MarkDirty();
                     }
 
                     var doorManipulator = ioEntity as CustomDoorManipulator;
@@ -2336,7 +2355,7 @@ namespace Oxide.Plugins
 
             return false;
         }
-
+        
         [Command("copy")]
         private void CmdCopy(IPlayer player, string command, string[] args)
         {
