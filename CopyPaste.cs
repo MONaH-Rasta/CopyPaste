@@ -1,4 +1,4 @@
-//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
+﻿//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
 //#define DEBUG
 
 using System;
@@ -28,7 +28,7 @@ using Graphics = System.Drawing.Graphics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake & misticos", "4.1.23")]
+    [Info("Copy Paste", "misticos", "4.1.25")]
     [Description("Copy and paste buildings to save them or move them")]
 
     public class CopyPaste : RustPlugin
@@ -71,7 +71,12 @@ namespace Oxide.Plugins
             {"sign.post.town", new SignSize(256, 128)},
             {"sign.post.town.roof", new SignSize(256, 128)},
             {"sign.hanging", new SignSize(128, 256)},
-            {"sign.hanging.ornate", new SignSize(256, 128)}
+            {"sign.hanging.ornate", new SignSize(256, 128)},
+            {"sign.neon.xl.animated", new SignSize(250, 250)},
+            {"sign.neon.xl", new SignSize(250, 250)},
+            {"sign.neon.125x215.animated", new SignSize(215, 125)},
+            {"sign.neon.125x215", new SignSize(215, 125)},
+            {"sign.neon.125x125", new SignSize(125, 125)},
         };
 
         private List<BaseEntity.Slot> _checkSlots = new List<BaseEntity.Slot>
@@ -693,17 +698,33 @@ namespace Oxide.Plugins
             }
 
             var sign = entity as Signage;
-            if (sign != null)
+            if (sign != null && sign.textureIDs != null)
             {
-                var imageByte = FileStorage.server.Get(sign.textureID, FileStorage.Type.png, sign.net.ID);
-
                 data.Add("sign", new Dictionary<string, object>
                 {
                     {"locked", sign.IsLocked()}
                 });
 
-                if (sign.textureID > 0 && imageByte != null)
-                    ((Dictionary<string, object>) data["sign"]).Add("texture", Convert.ToBase64String(imageByte));
+                var signData = ((Dictionary<string, object>)data["sign"]);
+
+                for (int num = 0; num < sign.textureIDs.Length; num++)
+                {
+                    var textureId = sign.textureIDs[num];
+
+                    if (textureId == 0)
+                    {
+                        continue;
+                    }
+
+                    var imageByte = FileStorage.server.Get(textureId, FileStorage.Type.png, sign.net.ID);
+
+                    if (imageByte != null)
+                    {
+                        signData.Add($"texture{num}", Convert.ToBase64String(imageByte));
+                    }
+                }
+
+                signData["amount"] = sign.textureIDs.Length;
             }
 
             if (copyData.SaveShare)
@@ -739,18 +760,6 @@ namespace Oxide.Plugins
                         {"authorizedPlayers", autoTurret.authorizedPlayers.Select(p => p.userid).ToList()}
                     });
                 }
-            }
-            
-            var cctvRC = entity as CCTV_RC;
-            
-            if (cctvRC != null)
-            {
-                data.Add("cctv", new Dictionary<string, object>
-                {
-                        {"yaw", cctvRC.yawAmount},
-                        {"pitch", cctvRC.pitchAmount},
-                        {"rcIdentifier", cctvRC.rcIdentifier}
-                });
             }
 
             var vendingMachine = entity as VendingMachine;
@@ -821,11 +830,11 @@ namespace Oxide.Plugins
                     ioData.Add("branchAmount", electricalBranch.branchAmount);
                 }
 
-                /*var counter = ioEntity.GetComponent<PowerCounter>();
+                var counter = ioEntity.GetComponent<PowerCounter>();
                 if (counter != null)
                 {
                     ioData.Add("targetNumber", counter.GetTarget());
-                }*/
+                }
 
                 var timerSwitch = ioEntity as TimerSwitch;
                 if (timerSwitch != null)
@@ -870,8 +879,7 @@ namespace Oxide.Plugins
             return maxHeight;
         }
 
-        private bool FindRayEntity(Vector3 sourcePos, Vector3 sourceDir, out Vector3 point, out BaseEntity entity,
-            int rayLayer)
+        private bool FindRayEntity(Vector3 sourcePos, Vector3 sourceDir, out Vector3 point, out BaseEntity entity, int rayLayer)
         {
             RaycastHit hitinfo;
             entity = null;
@@ -886,15 +894,23 @@ namespace Oxide.Plugins
             return true;
         }
 
-        private void FixSignage(Signage sign, byte[] imageBytes)
+        private void FixSignage(Signage sign, byte[] imageBytes, int num)
         {
             if (!_signSizes.ContainsKey(sign.ShortPrefabName))
+            {
                 return;
+            }
 
-            var resizedImage = ImageResize(imageBytes, _signSizes[sign.ShortPrefabName].Width,
-                _signSizes[sign.ShortPrefabName].Height);
+            int size = Mathf.Max(sign.paintableSources.Length, 1);
 
-            sign.textureID = FileStorage.server.Store(resizedImage, FileStorage.Type.png, sign.net.ID);
+            if (sign.textureIDs == null || sign.textureIDs.Length != size)
+            {
+                Array.Resize(ref sign.textureIDs, size);
+            }
+
+            var resizedImage = ImageResize(imageBytes, _signSizes[sign.ShortPrefabName].Width, _signSizes[sign.ShortPrefabName].Height);
+
+            sign.textureIDs[num] = FileStorage.server.Store(resizedImage, FileStorage.Type.png, sign.net.ID);
         }
 
         private object GetGround(Vector3 pos)
@@ -1296,11 +1312,27 @@ namespace Oxide.Plugins
                 {
                     var signData = data["sign"] as Dictionary<string, object>;
 
-                    if (signData.ContainsKey("texture"))
+                    if (signData.ContainsKey("amount"))
+                    {
+                        int amount;
+                        if (int.TryParse(signData["amount"].ToString(), out amount))
+                        {
+                            for (int num = 0; num < amount; num++)
+                            {
+                                if (signData.ContainsKey($"texture{num}"))
+                                {
+                                    var imageBytes = Convert.FromBase64String(signData[$"texture{num}"].ToString());
+
+                                    FixSignage(sign, imageBytes, num);
+                                }
+                            }
+                        }
+                    }
+                    else if (signData.ContainsKey("texture"))
                     {
                         var imageBytes = Convert.FromBase64String(signData["texture"].ToString());
 
-                        FixSignage(sign, imageBytes);
+                        FixSignage(sign, imageBytes, 0);
                     }
 
                     if (Convert.ToBoolean(signData["locked"]))
@@ -1344,17 +1376,6 @@ namespace Oxide.Plugins
                     }
 
                     cupboard.SendNetworkUpdate();
-                }
-                
-                var cctv_RC = entity as CCTV_RC;
-
-                if (cctv_RC != null && data.ContainsKey("cctv"))
-                {
-                    var cctv = (Dictionary<string, object>)data["cctv"];
-                    cctv_RC.yawAmount = Convert.ToSingle(cctv["yaw"]);
-                    cctv_RC.pitchAmount = Convert.ToSingle(cctv["pitch"]);
-                    cctv_RC.rcIdentifier = cctv["rcIdentifier"].ToString();
-                    cctv_RC.SendNetworkUpdate(BasePlayer.NetworkQueue.Update);
                 }
 
                 var vendingMachine = entity as VendingMachine;
@@ -1471,11 +1492,11 @@ namespace Oxide.Plugins
                     }
 
                     // Realized counter.targetCounterNumber is private, leaving it in in case signature changes.
-                    /*var counter = ioEntity.GetComponentInParent<PowerCounter>();
-                    if (counter != null)
+                    var counter = ioEntity.GetComponentInParent<PowerCounter>();
+                    if (counter != null && ioData.ContainsKey("targetNumber"))
                     {
                         counter.targetCounterNumber = Convert.ToInt32(ioData["targetNumber"]);
-                    }*/
+                    }
 
                     var timer = ioEntity as TimerSwitch;
                     if (timer != null && ioData.ContainsKey("timerLength"))
