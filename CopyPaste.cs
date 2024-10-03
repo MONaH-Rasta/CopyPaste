@@ -29,7 +29,7 @@ using Graphics = System.Drawing.Graphics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.1.27")] // Wulf skipped 24 :(
+    [Info("Copy Paste", "misticos", "4.1.28")] // Wulf skipped 24 :(
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : RustPlugin
     {
@@ -304,28 +304,35 @@ namespace Oxide.Plugins
         {
             const float maxDiff = 0.01f;
 
-            var ents = new List<BaseEntity>();
-            Vis.Entities(pos, maxDiff, ents);
-
-            foreach (var ent in ents)
+            var ents = Pool.GetList<BaseEntity>();
+            try
             {
-                if (ent.PrefabName != prefabname)
-                    continue;
+                Vis.Entities(pos, maxDiff, ents);
 
-                if (Vector3.Distance(ent.transform.position, pos) > maxDiff)
+                foreach (var ent in ents)
                 {
-                    continue;
+                    if (ent.PrefabName != prefabname)
+                        continue;
+
+                    if (Vector3.Distance(ent.transform.position, pos) > maxDiff)
+                    {
+                        continue;
+                    }
+
+                    if (Vector3.Distance(ent.transform.rotation.eulerAngles, rot.eulerAngles) > maxDiff)
+                    {
+                        continue;
+                    }
+
+                    return true;
                 }
 
-                if (Vector3.Distance(ent.transform.rotation.eulerAngles, rot.eulerAngles) > maxDiff)
-                {
-                    continue;
-                }
-
-                return true;
+                return false;
             }
-
-            return false;
+            finally
+            {
+                Pool.FreeList(ref ents);
+            }
         }
 
         private object CmdPasteBack(BasePlayer player, string[] args)
@@ -376,6 +383,12 @@ namespace Oxide.Plugins
                     if (ore != null)
                     {
                         ore.CleanupBonus();
+                    }
+
+                    var io = p as IOEntity;
+                    if (io != null)
+                    {
+                        io.ClearConnections();
                     }
 
                     if (p != null && !p.IsDestroyed)
@@ -452,33 +465,40 @@ namespace Oxide.Plugins
                     break;
 
                 var list = Pool.GetList<BaseEntity>();
-                Vis.Entities(checkFrom.Pop(), copyData.Range, list, copyData.CurrentLayer);
-
-                foreach (var entity in list)
+                try
                 {
-                    if (!houseList.Add(entity))
-                        continue;
+                    Vis.Entities(checkFrom.Pop(), copyData.Range, list, copyData.CurrentLayer);
 
-                    if (copyMechanics == CopyMechanics.Building)
+                    foreach (var entity in list)
                     {
-                        var buildingBlock = entity.GetComponentInParent<BuildingBlock>();
+                        if (!houseList.Add(entity))
+                            continue;
 
-                        if (buildingBlock != null)
+                        if (copyMechanics == CopyMechanics.Building)
                         {
-                            if (buildingId == 0)
-                                buildingId = buildingBlock.buildingID;
+                            var buildingBlock = entity.GetComponentInParent<BuildingBlock>();
 
-                            if (buildingId != buildingBlock.buildingID)
-                                continue;
+                            if (buildingBlock != null)
+                            {
+                                if (buildingId == 0)
+                                    buildingId = buildingBlock.buildingID;
+
+                                if (buildingId != buildingBlock.buildingID)
+                                    continue;
+                            }
                         }
-                    }
 
-                    if (copyData.EachToEach)
-                        checkFrom.Push(entity.transform.position);
-                    if (entity.GetComponent<BaseLock>() != null)
-                        continue;
-                    copyData.RawData.Add(EntityData(entity, entity.transform.position,
-                        entity.transform.rotation.eulerAngles / 57.29578f, copyData));
+                        if (copyData.EachToEach)
+                            checkFrom.Push(entity.transform.position);
+                        if (entity.GetComponent<BaseLock>() != null)
+                            continue;
+                        copyData.RawData.Add(EntityData(entity, entity.transform.position,
+                            entity.transform.rotation.eulerAngles / 57.29578f, copyData));
+                    }
+                }
+                finally
+                {
+                    Pool.FreeList(ref list);
                 }
 
                 copyData.BuildingId = buildingId;
@@ -564,6 +584,22 @@ namespace Oxide.Plugins
                 {"ownerid", entity.OwnerID}
             };
 
+            var growableEntity = entity as GrowableEntity;
+            if (growableEntity != null)
+            {
+                var genes = GrowableGeneEncoding.EncodeGenesToInt(growableEntity.Genes);
+                if (genes > 0)
+                {
+                    data.Add("genes", genes);
+                }
+
+                var perent = growableEntity.GetParentEntity();
+                if (perent != null)
+                {
+                    data.Add("hasParent", true);
+                }
+            }
+
             TryCopySlots(entity, data, copyData.SaveShare);
 
             var buildingblock = entity as BuildingBlock;
@@ -587,7 +623,8 @@ namespace Oxide.Plugins
                         {"amount", item.amount},
                         {"skinid", item.skin},
                         {"position", item.position},
-                        {"blueprintTarget", item.blueprintTarget}
+                        {"blueprintTarget", item.blueprintTarget},
+                        {"dataInt", item.instanceData?.dataInt ?? 0}
                     };
 
                     if (!string.IsNullOrEmpty(item.text))
@@ -649,7 +686,8 @@ namespace Oxide.Plugins
                         {"amount", item.amount},
                         {"skinid", item.skin},
                         {"position", item.position},
-                        {"blueprintTarget", item.blueprintTarget}
+                        {"blueprintTarget", item.blueprintTarget},
+                        {"dataInt", item.instanceData?.dataInt ?? 0}
                     };
 
                     if (!string.IsNullOrEmpty(item.text))
@@ -707,7 +745,7 @@ namespace Oxide.Plugins
 
                 var signData = (Dictionary<string, object>) data["sign"];
 
-                for (int num = 0; num < sign.textureIDs.Length; num++)
+                for (var num = 0; num < sign.textureIDs.Length; num++)
                 {
                     var textureId = sign.textureIDs[num];
                     if (textureId == 0)
@@ -721,6 +759,13 @@ namespace Oxide.Plugins
                 }
 
                 signData["amount"] = sign.textureIDs.Length;
+            }
+
+            var lights = entity as AdvancedChristmasLights;
+            if (lights != null)
+            {
+                data.Add("points", lights.points.Select(x => new {x.normal, x.point}));
+                data.Add("animationStyle", lights.animationStyle);
             }
 
             if (copyData.SaveShare)
@@ -1095,7 +1140,14 @@ namespace Oxide.Plugins
                 var box = entity as StorageContainer;
                 if (box != null)
                 {
-                    box.inventory.Clear();
+                    if (box.inventory == null)
+                    {
+                        box.inventory = new ItemContainer();
+                        box.inventory.ServerInitialize(null, box.inventorySlots);
+                        box.inventory.GiveUID();
+                        box.inventory.entityOwner = box;
+                    }
+                    else box.inventory.Clear();
 
                     var items = new List<object>();
 
@@ -1109,6 +1161,46 @@ namespace Oxide.Plugins
                         var itemamount = Convert.ToInt32(item["amount"]);
                         var itemskin = ulong.Parse(item["skinid"].ToString());
                         var itemcondition = Convert.ToSingle(item["condition"]);
+                        var dataInt = 0;
+                        if (item.ContainsKey("dataInt"))
+                        {
+                            dataInt = Convert.ToInt32(item["dataInt"]);
+                        }
+                        
+                        
+                        var growableEntity = entity as GrowableEntity;
+
+                        if (growableEntity != null)
+                        {
+                            if (data.ContainsKey("genes"))
+                            {
+                                var genesData = (int)data["genes"];
+
+                                if (genesData > 0)
+                                {
+                                    GrowableGeneEncoding.DecodeIntToGenes(genesData, growableEntity.Genes);
+                                }
+                            }
+
+                            if (data.ContainsKey("hasParent"))
+                            {
+                                var isParented = (bool)data["hasParent"];
+
+                                if (isParented)
+                                {
+                                    RaycastHit hitInfo;
+
+                                    if (Physics.Raycast(growableEntity.transform.position, Vector3.down, out hitInfo, .5f, Rust.Layers.DefaultDeployVolumeCheck))
+                                    {
+                                        var parentEntity = hitInfo.GetEntity();
+                                        if (parentEntity != null)
+                                        {
+                                            growableEntity.SetParent(parentEntity, true);
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         if (pasteData.IsItemReplace)
                             itemid = GetItemId(itemid);
@@ -1130,6 +1222,15 @@ namespace Oxide.Plugins
                                     blueprintTarget = GetItemId(blueprintTarget);
 
                                 i.blueprintTarget = blueprintTarget;
+                            }
+
+                            if (dataInt > 0)
+                            {
+                                i.instanceData = new ProtoBuf.Item.InstanceData()
+                                {
+                                    ShouldPool = false,
+                                    dataInt = dataInt
+                                };
                             }
 
                             if (item.ContainsKey("magazine"))
@@ -1216,7 +1317,12 @@ namespace Oxide.Plugins
                 var containerIo = entity as ContainerIOEntity;
                 if (containerIo != null)
                 {
-                    containerIo.inventory.Clear();
+                    if (containerIo.inventory == null)
+                    {
+                        containerIo.CreateInventory(true);
+                        containerIo.OnInventoryFirstCreated(containerIo.inventory);
+                    }
+                    else containerIo.inventory.Clear();
 
                     var items = new List<object>();
 
@@ -1230,6 +1336,11 @@ namespace Oxide.Plugins
                         var itemamount = Convert.ToInt32(itemJson["amount"]);
                         var itemskin = ulong.Parse(itemJson["skinid"].ToString());
                         var itemcondition = Convert.ToSingle(itemJson["condition"]);
+                        var dataInt = 0;
+                        if (itemJson.ContainsKey("dataInt"))
+                        {
+                            dataInt = Convert.ToInt32(itemJson["dataInt"]);
+                        }
 
                         if (pasteData.IsItemReplace)
                             itemid = GetItemId(itemid);
@@ -1253,6 +1364,15 @@ namespace Oxide.Plugins
                                 item.blueprintTarget = blueprintTarget;
                             }
 
+                            if (dataInt > 0)
+                            {
+                                item.instanceData = new ProtoBuf.Item.InstanceData()
+                                {
+                                    ShouldPool = false,
+                                    dataInt = dataInt
+                                };
+                            }
+                            
                             if (itemJson.ContainsKey("magazine"))
                             {
                                 var heldent = item.GetHeldEntity();
@@ -1323,7 +1443,7 @@ namespace Oxide.Plugins
                         int amount;
                         if (int.TryParse(signData["amount"].ToString(), out amount))
                         {
-                            for (int num = 0; num < amount; num++)
+                            for (var num = 0; num < amount; num++)
                             {
                                 if (signData.ContainsKey($"texture{num}"))
                                 {
@@ -1345,6 +1465,20 @@ namespace Oxide.Plugins
                         sign.SetFlag(BaseEntity.Flags.Locked, true);
 
                     sign.SendNetworkUpdate();
+                }
+
+                var lights = entity as AdvancedChristmasLights;
+                if (lights != null)
+                {
+                    foreach (var point in (data["points"] as List<object>))
+                    {
+                        var pointData = point as Dictionary<string, object>;
+                        lights.points.Add(new AdvancedChristmasLights.pointEntry
+                            {normal = (Vector3) pointData["normal"], point = (Vector3) pointData["point"]});
+                    }
+                    
+                    lights.animationStyle = (AdvancedChristmasLights.AnimationType) data["animationStyle"];
+                    data.Add("points", lights.points.Select(x => new {x.normal, x.point}));
                 }
 
                 var sleepingBag = entity as SleepingBag;
@@ -2006,7 +2140,7 @@ namespace Oxide.Plugins
 
                 slotEntity.gameObject.Identity();
                 slotEntity.SetParent(ent, slotName);
-                slotEntity.OnDeployed(ent, null);
+                slotEntity.OnDeployed(ent, null, null);
                 slotEntity.Spawn();
 
                 ent.SetSlot(slot, slotEntity);
