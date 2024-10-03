@@ -22,7 +22,7 @@ using Debug = System.Diagnostics.Debug;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.9", ResourceId = 716)]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.10", ResourceId = 716)]
     [Description("Copy and paste buildings to save them or move them")]
 	
     public class CopyPaste : RustPlugin
@@ -110,6 +110,10 @@ namespace Oxide.Plugins
             [DefaultValue(15)]
             public int UndoBatchSize = 15;
 
+            [JsonProperty(PropertyName = "Enable data saving feature")]
+            [DefaultValue(true)]
+            public bool DataSaving = true;
+
             public class CopyOptions
             {
                 [JsonProperty(PropertyName = "Check radius from each entity (true/false)")]
@@ -123,6 +127,10 @@ namespace Oxide.Plugins
                 [JsonProperty(PropertyName = "Tree (true/false)")]
                 [DefaultValue(false)]
                 public bool Tree { get; set; } = false;
+
+                [JsonProperty(PropertyName = "Default radius to look for entities from block")]
+                [DefaultValue(3.0f)]
+                public float Radius { get; set; } = 3.0f;
             }
 
             public class PasteOptions
@@ -244,6 +252,8 @@ namespace Oxide.Plugins
 
             if (!Physics.Raycast(player.eyes.HeadRay(), out hit, 1000f, rayPaste))
                 return Lang("NO_ENTITY_RAY", player.UserIDString);
+
+            SendReply(player, hit.point.ToString());
 			
             return TryPaste(hit.point, filename, player, DegreeToRadian(player.GetNetworkRotation().eulerAngles.y), args, callback: callback);
         }
@@ -331,7 +341,7 @@ namespace Oxide.Plugins
             });
 
             // If it gets stuck in infinite loop break the loop.
-            if (entities.Count == count)
+            if (count != 0 && entities.Count != 0 && entities.Count == count)
             {
                 if (player != null)
                     SendReply(player, "Undo cancelled because of infinite loop.");
@@ -419,7 +429,8 @@ namespace Oxide.Plugins
 
                     if (copyData.EachToEach)
                         checkFrom.Push(entity.transform.position);
-
+                    if (entity.GetComponent<BaseLock>() != null)
+                        continue;
                     copyData.RawData.Add(EntityData(entity, entity.transform.position, entity.transform.rotation.eulerAngles / 57.29578f, copyData));
                 }
 
@@ -460,6 +471,7 @@ namespace Oxide.Plugins
                 };
 
                 Interface.Oxide.DataFileSystem.SaveDatafile(path);
+
                 SendReply(copyData.Player, Lang("COPY_SUCCESS", copyData.Player.UserIDString, copyData.FileName));
 
                 copyData.callback?.Invoke();
@@ -693,22 +705,28 @@ namespace Oxide.Plugins
                 }
                 ioData.Add("outputs", outputs);
                 ioData.Add("oldID", ioEntity.net.ID);
-                var electricalBranch = ioEntity.GetComponentInParent<ElectricalBranch>();
+                var electricalBranch = ioEntity as ElectricalBranch;
                 if (electricalBranch != null)
                 {
                     ioData.Add("branchAmount", electricalBranch.branchAmount);
                 }
 
-                /*var counter = ioEntity.GetComponentInParent<PowerCounter>();
+                /*var counter = ioEntity.GetComponent<PowerCounter>();
                 if (counter != null)
                 {
                     ioData.Add("targetNumber", counter.GetTarget());
                 }*/
 
-                var timer = ioEntity.GetComponentInParent<TimerSwitch>();
-                if (timer != null)
+                var timerSwitch = ioEntity as TimerSwitch;
+                if (timerSwitch != null)
                 {
-                    ioData.Add("timerLength", timer.timerLength);
+                    ioData.Add("timerLength", timerSwitch.timerLength);
+                }
+
+                var rfBroadcaster = ioEntity as IRFObject;
+                if (rfBroadcaster != null)
+                {
+                    ioData.Add("frequency", rfBroadcaster.GetFrequency());
                 }
 
                 data.Add("IOEntity", ioData);
@@ -770,11 +788,9 @@ namespace Oxide.Plugins
         private object GetGround(Vector3 pos)
         {
             RaycastHit hitInfo;
+            pos += new Vector3(0, 100, 0);
 
-            if (Physics.Raycast(pos, Vector3.up, out hitInfo, groundLayer))
-                return hitInfo.point;
-
-            if (Physics.Raycast(pos, Vector3.down, out hitInfo, groundLayer))
+            if (Physics.Raycast(pos, Vector3.down, out hitInfo, 200, groundLayer))
                 return hitInfo.point;
 
             return null;
@@ -1240,6 +1256,18 @@ namespace Oxide.Plugins
                         timer.timerLength = Convert.ToInt32(ioData["timerLength"]);
                     }
 
+                    var rfBroadcaster = ioEntity as RFBroadcaster;
+                    if (rfBroadcaster != null && ioData.ContainsKey("frequency"))
+                    {
+                        rfBroadcaster.frequency = Convert.ToInt32(ioData["frequency"]);
+                    }
+
+                    var rfReceiver = ioEntity as RFBroadcaster;
+                    if (rfReceiver != null && ioData.ContainsKey("frequency"))
+                    {
+                        rfReceiver.frequency = Convert.ToInt32(ioData["frequency"]);
+                    }
+
                     var doorManipulator = ioEntity as CustomDoorManipulator;
                     if (doorManipulator != null)
                     {
@@ -1417,7 +1445,7 @@ namespace Oxide.Plugins
         {
             bool saveShare = config.Copy.Share, saveTree = config.Copy.Tree, eachToEach = config.Copy.EachToEach;
             CopyMechanics copyMechanics = CopyMechanics.Proximity;
-            float radius = 3f;
+            float radius = config.Copy.Radius;
 
             for (int i = 0; ; i = i + 2)
             {
@@ -1531,6 +1559,7 @@ namespace Oxide.Plugins
                     if (keyLock.firstKeyCreated)
                         code |= 0x80;
 
+                    codedata.Add("ownerId", keyLock.OwnerID.ToString());
                     codedata.Add("code", code.ToString());
                 }
 
@@ -1546,7 +1575,8 @@ namespace Oxide.Plugins
 
             foreach (BaseEntity.Flags flag in Enum.GetValues(typeof(BaseEntity.Flags)))
             {
-                flags.Add(flag.ToString(), entity.HasFlag(flag));
+                if (!config.DataSaving || entity.HasFlag(flag))
+                    flags.Add(flag.ToString(), entity.HasFlag(flag));
             }
 
             return flags;
@@ -1769,6 +1799,11 @@ namespace Oxide.Plugins
                         keyLock.firstKeyCreated = true;
                         keyLock.SetFlag(BaseEntity.Flags.Locked, true);
                     }
+
+                    if (slotData.ContainsKey("ownerId"))
+                    {
+                        keyLock.OwnerID = Convert.ToUInt64(slotData["ownerId"]);
+                    }
                 }
             }
 
@@ -1846,7 +1881,7 @@ namespace Oxide.Plugins
             }
         }
 
-		[ChatCommand("list")]
+		[ChatCommand("copylist")]
         private void cmdChatList(BasePlayer player, string command, string[] args)
         {
             if (!HasAccess(player, listPermission))
@@ -2400,8 +2435,8 @@ namespace Oxide.Plugins
                 {"ru", "Что-то препятствует вставке"},
             }},
             {"AVAILABLE_STRUCTURES", new Dictionary<string, string>() {
-                {"en", "<color=orange>Доступные постройки:</color>"},
-                {"ru", "<color=orange>Available structures:</color>"},
+                {"ru", "<color=orange>Доступные постройки:</color>"},
+                {"en", "<color=orange>Available structures:</color>"},
             }},
         };
 
