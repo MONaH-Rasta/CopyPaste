@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.0", ResourceId = 716)]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.1", ResourceId = 716)]
     [Description("Copy and paste buildings to save them or move them")]
 	
     public class CopyPaste : RustPlugin
@@ -35,6 +35,8 @@ namespace Oxide.Plugins
 					 , undoPermission 		= "copypaste.undo"
 					 , serverID 			= "Server"
 					 , subDirectory 		= "copypaste/";
+
+        private const int CopyBatchSize = 500;
 
         private Dictionary<string, Stack<List<BaseEntity>>> lastPastes = new Dictionary<string, Stack<List<BaseEntity>>>();
 
@@ -68,7 +70,7 @@ namespace Oxide.Plugins
             BaseEntity.Slot.LowerModifier
         };
 
-        private enum CopyMechanics { Building, Proximity }
+        public enum CopyMechanics { Building, Proximity }
 
         private class SignSize
         {
@@ -316,60 +318,56 @@ namespace Oxide.Plugins
 
             if(entities.Count > 0)
                 NextTick(() => DoUndo(entities, entities.Count));
+            else
+            {
+                Puts("Undo Complete.");
+            }
         }
 
         private object Copy(Vector3 sourcePos, Vector3 sourceRot, string filename, float RotationCorrection, CopyMechanics copyMechanics, float range, bool saveTree, bool saveShare, bool eachToEach)
         {
-            var copy = CopyProcess(sourcePos, sourceRot, RotationCorrection, range, saveTree, saveShare, copyMechanics, eachToEach);
-
-            if (copy is string)
-                return copy;
-
-            string path = subDirectory + filename;
-            var CopyData = Interface.Oxide.DataFileSystem.GetDatafile(path);
-
-            CopyData.Clear();
-			
-            CopyData["default"] = new Dictionary<string, object>
-            {
-                {"position", new Dictionary<string, object>
-                    {
-                        {"x", sourcePos.x.ToString()},
-                        {"y", sourcePos.y.ToString()},
-                        {"z", sourcePos.z.ToString()}
-                    }
-                },
-                {"rotationy", sourceRot.y.ToString()},
-                {"rotationdiff", RotationCorrection.ToString()}
-            };
-			
-            CopyData["entities"] = copy as List<object>;	
-            CopyData["protocol"] = new Dictionary<string, object>
-            {
-                {"items", 2}
-            };
-			
-            Interface.Oxide.DataFileSystem.SaveDatafile(path);
-
-            return true;
-        } 
-
-        private object CopyProcess(Vector3 sourcePos, Vector3 sourceRot, float RotationCorrection, float range, bool saveTree, bool saveShare, CopyMechanics copyMechanics, bool eachToEach)
-        {
             List<object> rawData = new List<object>();
-            HashSet<BaseEntity> houseList = new HashSet<BaseEntity>();
-            List<Vector3> checkFrom = new List<Vector3> { sourcePos };
-            int currentLayer = copyLayer, current = 0;
-            uint buildingID = 0;
+            int currentLayer = copyLayer;
 
             if (saveTree)
                 currentLayer |= LayerMask.GetMask("Tree");
 
-            var count = 0;
-            while (current < checkFrom.Count)
+            var copyData = new CopyData()
             {
+                FileName = filename,
+                CurrentLayer = currentLayer,
+                RotCor = RotationCorrection,
+                Range = range,
+                SaveShare = saveShare,
+                SaveTree = saveTree,
+                CopyMechanics = copyMechanics,
+                EachToEach = eachToEach,
+                SourcePos = sourcePos,
+                SourceRot = sourceRot
+            };
+
+            copyData.CheckFrom.Push(sourcePos);
+
+            CopyLoop(copyData);
+
+            return rawData;
+        }
+
+        private object CopyLoop(CopyData copyData)
+        {
+            var checkFrom = copyData.CheckFrom;
+            var houseList = copyData.HouseList;
+            var buildingID = copyData.BuildingID;
+            var copyMechanics = copyData.CopyMechanics;
+            var batchSize = checkFrom.Count < CopyBatchSize ? checkFrom.Count : CopyBatchSize;
+
+            for(int i = 0; i < batchSize; i++)
+            {
+                if (checkFrom.Count == 0)
+                    break;
+
                 List<BaseEntity> list = Pool.GetList<BaseEntity>();
-                Vis.Entities<BaseEntity>(checkFrom[current], range, list, currentLayer);
+                Vis.Entities<BaseEntity>(checkFrom.Pop(), copyData.Range, list, copyData.CurrentLayer);
 
                 foreach (var entity in list)
                 {
@@ -390,21 +388,56 @@ namespace Oxide.Plugins
                         }
                     }
 
-                    if (eachToEach && !checkFrom.Contains(entity.transform.position))
-                        checkFrom.Add(entity.transform.position);
-                    ++count;
-                    rawData.Add(EntityData(entity, sourcePos, sourceRot, entity.transform.position, entity.transform.rotation.ToEulerAngles(), RotationCorrection, saveShare));
+                    if (copyData.EachToEach)
+                        checkFrom.Push(entity.transform.position);
+
+                    copyData.RawData.Add(EntityData(entity, copyData.SourcePos, copyData.SourceRot, entity.transform.position,
+                        entity.transform.rotation.eulerAngles / 57.29578f, copyData.RotCor, copyData.SaveShare));
                 }
 
-                Pool.FreeList(ref list);
-
-                current++;
+                copyData.BuildingID = buildingID;
             }
 
-            return rawData;
+            if (checkFrom.Count > 0)
+            {
+                NextTick(() => CopyLoop(copyData));
+            }
+            else
+            {
+                string path = subDirectory + copyData.FileName;
+                var datafile = Interface.Oxide.DataFileSystem.GetDatafile(path);
+
+                datafile.Clear();
+
+                var sourcePos = copyData.SourcePos;
+
+                datafile["default"] = new Dictionary<string, object>
+                {
+                    {"position", new Dictionary<string, object>
+                        {
+                            {"x", sourcePos.x.ToString()},
+                            {"y", sourcePos.y.ToString()},
+                            {"z", sourcePos.z.ToString()}
+                        }
+                    },
+                    {"rotationy", copyData.SourceRot.y.ToString()},
+                    {"rotationdiff", copyData.RotCor.ToString()}
+                };
+
+                datafile["entities"] = copyData.RawData;
+                datafile["protocol"] = new Dictionary<string, object>
+                {
+                    {"items", 2}
+                };
+
+                Interface.Oxide.DataFileSystem.SaveDatafile(path);
+                Puts($"Copy complete. {copyData.RawData.Count} items copied.");
+            }
+
+            return null;
         }
 
-		private float DegreeToRadian(float angle)
+        private float DegreeToRadian(float angle)
 		{
 		   return (float)(Math.PI * angle / 180.0f);
 		}
@@ -759,14 +792,14 @@ namespace Oxide.Plugins
             var eulerRotation = new Vector3(0f, RotationCorrection, 0f);
             var quaternionRotation = Quaternion.Euler(eulerRotation);
 
-            DoPaste(entities, startPos, player, stability, quaternionRotation, ioEntities, buildingID, pastedEntities, isItemReplace, heightAdj);
+            DoPaste(entities, startPos, player, stability, quaternionRotation, ioEntities, buildingID, pastedEntities, isItemReplace, heightAdj, new List<StabilityEntity>());
 
             return pastedEntities;
         }
 
         private void DoPaste(ICollection<Dictionary<string, object>> entities,
             Vector3 startPos, BasePlayer player, bool stability,
-            Quaternion rotation, Dictionary<uint, Dictionary<string, object>> ioEntities, uint buildingID, List<BaseEntity> pastedEntities, bool isItemReplace, float heightAdj)
+            Quaternion rotation, Dictionary<uint, Dictionary<string, object>> ioEntities, uint buildingID, List<BaseEntity> pastedEntities, bool isItemReplace, float heightAdj, List<StabilityEntity> stabilityEntities)
         {
             var todo = entities.Take(100).ToArray();
 
@@ -774,10 +807,10 @@ namespace Oxide.Plugins
             foreach (var data in todo)
             {
                 entities.Remove(data);
-                string prefabname = (string)data["prefabname"];
+                var prefabname = (string)data["prefabname"];
                 ulong skinid = ulong.Parse(data["skinid"].ToString());
-                Vector3 pos = (Vector3)data["position"];
-                Quaternion rot = (Quaternion)data["rotation"];
+                var pos = (Vector3)data["position"];
+                var rot = (Quaternion)data["rotation"];
 
                 if (CheckPlaced(prefabname, pos, rot))
                     continue;
@@ -805,8 +838,7 @@ namespace Oxide.Plugins
                 {
                     buildingBlock.blockDefinition = PrefabAttribute.server.Find<Construction>(buildingBlock.prefabID);
                     buildingBlock.SetGrade((BuildingGrade.Enum)data["grade"]);
-
-                    if (!stability)
+                    if(!stability)
                         buildingBlock.grounded = true;
 
                 }
@@ -819,6 +851,17 @@ namespace Oxide.Plugins
                         buildingID = BuildingManager.server.NewBuildingID();
 
                     decayEntity.AttachToBuilding(buildingID);
+                }
+
+                StabilityEntity stabilityEntity = entity.GetComponentInParent<StabilityEntity>();
+
+                if (stabilityEntity != null)
+                {
+                    if (!stabilityEntity.grounded)
+                    {
+                        stabilityEntity.grounded = true;
+                        stabilityEntities.Add(stabilityEntity);
+                    }
                 }
 
                 entity.skinID = skinid;
@@ -1065,7 +1108,7 @@ namespace Oxide.Plugins
                     ioData.Add("newId", ioEntity.net.ID);
 
                     var electricalBranch = ioEntity.GetComponentInParent<ElectricalBranch>();
-                    if (electricalBranch != null)
+                    if (electricalBranch != null && ioData.ContainsKey("branchAmount"))
                     {
                         electricalBranch.branchAmount = Convert.ToInt32(ioData["branchAmount"]);
                     }
@@ -1078,7 +1121,7 @@ namespace Oxide.Plugins
                     }*/
 
                     var timer = ioEntity.GetComponentInParent<TimerSwitch>();
-                    if (timer != null)
+                    if (timer != null && ioData.ContainsKey("timerLength"))
                     {
                         timer.timerLength = Convert.ToInt32(ioData["timerLength"]);
                     }
@@ -1090,7 +1133,8 @@ namespace Oxide.Plugins
                         doorManipulator.SetTargetDoor(door);
                     }
 
-                    ioEntities.Add(Convert.ToUInt32(ioData["oldID"]), ioData);
+                    if(ioData.ContainsKey("oldID"))
+                        ioEntities.Add(Convert.ToUInt32(ioData["oldID"]), ioData);
                 }
 
                 var flagsData = new Dictionary<string, object>();
@@ -1102,13 +1146,9 @@ namespace Oxide.Plugins
 
                 foreach (var flagData in flagsData)
                 {
-                    try //Enum.TryParse?
-                    {
-                        BaseEntity.Flags baseFlag = (BaseEntity.Flags)Enum.Parse(typeof(BaseEntity.Flags), flagData.Key);
-
+                    BaseEntity.Flags baseFlag;
+                    if(Enum.TryParse(flagData.Key, out baseFlag))
                         flags.Add(baseFlag, Convert.ToBoolean(flagData.Value));
-                    }
-                    catch (Exception ex) { }
                 }
 
                 foreach (var flag in flags)
@@ -1119,20 +1159,15 @@ namespace Oxide.Plugins
                 pastedEntities.Add(entity);
             }
             if(entities.Count > 0)
-                NextTick(() => DoPaste(entities, startPos, player, stability, rotation, ioEntities, buildingID, pastedEntities, isItemReplace, heightAdj));
+                NextTick(() => DoPaste(entities, startPos, player, stability, rotation, ioEntities, buildingID, pastedEntities, isItemReplace, heightAdj, stabilityEntities));
             else
             {
-                Stopwatch sw = Stopwatch.StartNew();
-                if (stability)
-                    pastedEntities.OfType<BuildingBlock>()
-                        .Where(p => !p.PrefabName.Contains("foundation"))
-                        .ToList()
-                        .ForEach(p =>
-                        {
-                            p.grounded = false;
-                            p.UpdateStability();
-                        });
-
+                foreach (var entity in stabilityEntities)
+                {
+                    entity.grounded = false;
+                    entity.InitializeSupports();
+                    entity.UpdateStability();
+                }
                 foreach (var ioData in ioEntities.Values)
                 {
 
@@ -1150,7 +1185,11 @@ namespace Oxide.Plugins
                         for (int index = 0; index < inputs.Count; index++)
                         {
                             var input = inputs[index] as Dictionary<string, object>;
-                            uint oldId = Convert.ToUInt32(input["connectedID"]);
+                            object oldIdObject;
+                            if (!input.TryGetValue("connectedID", out oldIdObject))
+                                continue;
+
+                            uint oldId = Convert.ToUInt32(oldIdObject);
 
                             if (ioEntities.ContainsKey(oldId))
                             {
@@ -1159,10 +1198,19 @@ namespace Oxide.Plugins
 
                                 Dictionary<string, object> ioConnection = ioEntities[oldId];
 
-                                ioEntity.inputs[index].connectedTo.entityRef.uid = Convert.ToUInt32(ioConnection["newId"]);
-                                ioEntity.inputs[index].connectedToSlot = Convert.ToInt32(input["connectedToSlot"]);
-                                ioEntity.inputs[index].niceName = input["niceName"] as string;
-                                ioEntity.inputs[index].type = (IOEntity.IOType)input["type"];
+                                object temp;
+
+                                if (ioConnection.TryGetValue("newId", out temp))
+                                    ioEntity.inputs[index].connectedTo.entityRef.uid = Convert.ToUInt32(temp);
+
+                                if (ioConnection.TryGetValue("connectedToSlot", out temp))
+                                    ioEntity.inputs[index].connectedToSlot = Convert.ToInt32(temp);
+
+                                if (ioConnection.TryGetValue("niceName", out temp))
+                                    ioEntity.inputs[index].niceName = temp as string;
+
+                                if (ioConnection.TryGetValue("type", out temp))
+                                    ioEntity.inputs[index].type = (IOEntity.IOType)temp;
                             }
 
 
@@ -1187,10 +1235,19 @@ namespace Oxide.Plugins
 
                                 Dictionary<string, object> ioConnection = ioEntities[connectedOldId];
 
-                                ioEntity.outputs[index].connectedTo.entityRef.uid = Convert.ToUInt32(ioConnection["newId"]);
-                                ioEntity.outputs[index].connectedToSlot = Convert.ToInt32(output["connectedToSlot"]);
-                                ioEntity.outputs[index].niceName = output["niceName"] as string;
-                                ioEntity.outputs[index].type = (IOEntity.IOType)output["type"];
+                                object temp;
+
+                                if (ioConnection.TryGetValue("newId", out temp))
+                                    ioEntity.outputs[index].connectedTo.entityRef.uid = Convert.ToUInt32(temp);
+
+                                if (ioConnection.TryGetValue("connectedToSlot", out temp))
+                                    ioEntity.outputs[index].connectedToSlot = Convert.ToInt32(temp);
+
+                                if (ioConnection.TryGetValue("niceName", out temp))
+                                    ioEntity.outputs[index].niceName = temp as string;
+
+                                if (ioConnection.TryGetValue("type", out temp))
+                                    ioEntity.outputs[index].type = (IOEntity.IOType)temp;
 
                                 if (output.ContainsKey("linePoints"))
                                 {
@@ -1216,6 +1273,8 @@ namespace Oxide.Plugins
                         }
                     }
                 }
+
+                SendReply(player, "Pasting complete.");
             }
         }
 
@@ -1764,6 +1823,7 @@ namespace Oxide.Plugins
                 SendReply(arg, (string)result);
             else
                 SendReply(arg, Lang("UNDO_SUCCESS", null));
+
         }
 
 		//Replace between old ItemID to new ItemID
@@ -2248,5 +2308,25 @@ namespace Oxide.Plugins
                 {"ru", "<color=orange>Available structures:</color>"},
             }},
         };
+
+        public class CopyData
+        {
+            public BasePlayer player;
+            public Stack<Vector3> CheckFrom = new Stack<Vector3>();
+            public HashSet<BaseEntity> HouseList = new HashSet<BaseEntity>();
+            public List<object> RawData = new List<object>();
+            public Vector3 SourcePos;
+            public Vector3 SourceRot;
+
+            public string FileName;
+            public int CurrentLayer;
+            public float RotCor;
+            public float Range;
+            public bool SaveTree;
+            public bool SaveShare;
+            public CopyMechanics CopyMechanics;
+            public bool EachToEach;
+            public uint BuildingID = 0;
+        }
     }
 }
