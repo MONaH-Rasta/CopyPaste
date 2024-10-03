@@ -5,6 +5,7 @@ using Graphics = System.Drawing.Graphics;
 using ImageFormat = System.Drawing.Imaging.ImageFormat;
 using Newtonsoft.Json;
 using Oxide.Core;
+using Oxide.Game.Rust;
 using ProtoBuf;
 using System;
 using System.Collections.Generic;
@@ -16,7 +17,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb", "3.6.8", ResourceId = 716)]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.0.3", ResourceId = 716)]
     [Description("Copy and paste buildings to save them or move them")]
 	
     public class CopyPaste : RustPlugin
@@ -343,6 +344,7 @@ namespace Oxide.Plugins
             if (saveTree)
                 currentLayer |= LayerMask.GetMask("Tree");
 
+            var count = 0;
             while (current < checkFrom.Count)
             {
                 List<BaseEntity> list = Pool.GetList<BaseEntity>();
@@ -369,7 +371,7 @@ namespace Oxide.Plugins
 
                     if (eachToEach && !checkFrom.Contains(entity.transform.position))
                         checkFrom.Add(entity.transform.position);
-
+                    ++count;
                     rawData.Add(EntityData(entity, sourcePos, sourceRot, entity.transform.position, entity.transform.rotation.ToEulerAngles(), RotationCorrection, saveShare));
                 }
 
@@ -553,6 +555,69 @@ namespace Oxide.Plugins
                 });
             }
 
+            var ioEntity = entity.GetComponentInParent<IOEntity>();
+
+            if (ioEntity != null)
+            {
+                var ioData = new Dictionary<string, object>();
+                List<object> inputs = ioEntity.inputs.Select(input => new Dictionary<string, object>
+                    {
+                        {"connectedID", input.connectedTo.entityRef.uid},
+                        {"connectedToSlot", input.connectedToSlot},
+                        {"niceName", input.niceName},
+                        {"type", (int) input.type},
+                    })
+                    .Cast<object>()
+                    .ToList();
+                ioData.Add("inputs", inputs);
+
+                List<object> outputs = new List<object>();
+                foreach (IOEntity.IOSlot output in ioEntity.outputs)
+                {
+                    Dictionary<string, object> ioConnection = new Dictionary<string, object>
+                    {
+                        {"connectedID", output.connectedTo.entityRef.uid },
+                        {"connectedToSlot", output.connectedToSlot },
+                        {"niceName", output.niceName },
+                        {"type", (int)output.type },
+                    };
+
+                    var linePoints = new List<Vector3>();
+                    if (output.linePoints != null)
+                    {
+                        // Since Vector3 is struct should be able to simply save the Vecot directly.
+                        foreach (Vector3 linePoint in output.linePoints)
+                        {
+                            linePoints.Add(NormalizePosition(sourcePos, linePoint, diffRot));
+                        }
+                    }
+                    ioConnection.Add("linePoints", linePoints);
+
+                    outputs.Add(ioConnection);
+                }
+                ioData.Add("outputs", outputs);
+                ioData.Add("oldID", ioEntity.net.ID);
+                var electricalBranch = ioEntity.GetComponentInParent<ElectricalBranch>();
+                if (electricalBranch != null)
+                {
+                    ioData.Add("branchAmount", electricalBranch.branchAmount);
+                }
+
+                /*var counter = ioEntity.GetComponentInParent<PowerCounter>();
+                if (counter != null)
+                {
+                    ioData.Add("targetNumber", counter.GetTarget());
+                }*/
+
+                var timer = ioEntity.GetComponentInParent<TimerSwitch>();
+                if (timer != null)
+                {
+                    ioData.Add("timerLength", timer.timerLength);
+                }
+
+                data.Add("IOEntity", ioData);
+            }
+
             return data;
         }
 
@@ -659,7 +724,7 @@ namespace Oxide.Plugins
             return transformedPos;
         }
 
-        private List<BaseEntity> Paste(List<Dictionary<string, object>> entities, Dictionary<string, object> protocol, Vector3 startPos, BasePlayer player, bool stability)
+        private List<BaseEntity> Paste(List<Dictionary<string, object>> entities, Dictionary<string, object> protocol, Vector3 startPos, BasePlayer player, bool stability, float RotationCorrection, float heightAdj)
         {
             uint buildingID = 0;
             var pastedEntities = new List<BaseEntity>();
@@ -667,7 +732,9 @@ namespace Oxide.Plugins
 			//Settings
 			
 			bool isItemReplace = !protocol.ContainsKey("items");
-				
+
+            var ioEntities = new Dictionary<uint, Dictionary<string, object>>();
+
             foreach (var data in entities)
             {
                 string prefabname = (string)data["prefabname"];
@@ -946,6 +1013,48 @@ namespace Oxide.Plugins
                     vendingMachine.FullUpdate();
                 }
 
+                var ioEntity = entity.GetComponentInParent<IOEntity>();
+                if (ioEntity != null)
+                {
+                    var ioData = new Dictionary<string, object>();
+
+                    if (data.ContainsKey("IOEntity"))
+                    {
+                        ioData = data["IOEntity"] as Dictionary<string, object> ?? new Dictionary<string, object>();
+                    }
+
+                    ioData.Add("entity", ioEntity);
+                    ioData.Add("newId", ioEntity.net.ID);
+
+                    var electricalBranch = ioEntity.GetComponentInParent<ElectricalBranch>();
+                    if (electricalBranch != null)
+                    {
+                        electricalBranch.branchAmount = Convert.ToInt32(ioData["branchAmount"]);
+                    }
+
+                    // Realized counter.targetCounterNumber is private, leaving it in in case signature changes.
+                    /*var counter = ioEntity.GetComponentInParent<PowerCounter>();
+                    if (counter != null)
+                    {
+                        counter.targetCounterNumber = Convert.ToInt32(ioData["targetNumber"]);
+                    }*/
+
+                    var timer = ioEntity.GetComponentInParent<TimerSwitch>();
+                    if (timer != null)
+                    {
+                        timer.timerLength = Convert.ToInt32(ioData["timerLength"]);
+                    }
+
+                    var doorManipulator = ioEntity.GetComponentInParent<CustomDoorManipulator>();
+                    if (doorManipulator != null)
+                    {
+                        Door door = doorManipulator.FindDoor(true);
+                        doorManipulator.SetTargetDoor(door);
+                    }
+
+                    ioEntities.Add(Convert.ToUInt32(ioData["oldID"]), ioData);
+                }
+
                 var flagsData = new Dictionary<string, object>();
 
                 if (data.ContainsKey("flags"))
@@ -970,6 +1079,93 @@ namespace Oxide.Plugins
                 }
 
                 pastedEntities.Add(entity);
+            }
+
+            // For IO connection the new ID is needed so linking is performed after the paste is done.
+            foreach (var ioData in ioEntities.Values)
+            {
+                var eulerRotation = new Vector3(0f, RotationCorrection, 0f);
+                var quaternionRotation = Quaternion.EulerRotation(eulerRotation);
+
+                if (!ioData.ContainsKey("entity"))
+                    continue;
+
+                var ioEntity = ioData["entity"] as IOEntity;
+
+                List<object> inputs = null;
+                if (ioData.ContainsKey("inputs"))
+                    inputs = ioData["inputs"] as List<object>;
+
+                if (inputs != null && inputs.Count > 0)
+                {
+                    for (int index = 0; index < inputs.Count; index++)
+                    {
+                        var input = inputs[index] as Dictionary<string, object>;
+                        uint oldId = Convert.ToUInt32(input["connectedID"]);
+
+                        if (ioEntities.ContainsKey(oldId))
+                        {
+                            if (ioEntity.inputs[index] == null)
+                                ioEntity.inputs[index] = new IOEntity.IOSlot();
+
+                            Dictionary<string, object> ioConnection = ioEntities[oldId];
+
+                            ioEntity.inputs[index].connectedTo.entityRef.uid = Convert.ToUInt32(ioConnection["newId"]);
+                            ioEntity.inputs[index].connectedToSlot = Convert.ToInt32(input["connectedToSlot"]);
+                            ioEntity.inputs[index].niceName = input["niceName"] as string;
+                            ioEntity.inputs[index].type = (IOEntity.IOType)input["type"];
+                        }
+
+
+                    }
+                }
+
+                List<object> outputs = null;
+                if (ioData.ContainsKey("outputs"))
+                    outputs = ioData["outputs"] as List<object>;
+
+                if (outputs != null && outputs.Count > 0)
+                {
+                    for (int index = 0; index < outputs.Count; index++)
+                    {
+                        var output = outputs[index] as Dictionary<string, object>;
+                        var connectedOldId = Convert.ToUInt32(output["connectedID"]);
+
+                        if (ioEntities.ContainsKey(connectedOldId))
+                        {
+                            if (ioEntity.outputs[index] == null)
+                                ioEntity.outputs[index] = new IOEntity.IOSlot();
+
+                            Dictionary<string, object> ioConnection = ioEntities[connectedOldId];
+
+                            ioEntity.outputs[index].connectedTo.entityRef.uid = Convert.ToUInt32(ioConnection["newId"]);
+                            ioEntity.outputs[index].connectedToSlot = Convert.ToInt32(output["connectedToSlot"]);
+                            ioEntity.outputs[index].niceName = output["niceName"] as string;
+                            ioEntity.outputs[index].type = (IOEntity.IOType)output["type"];
+
+                            if (output.ContainsKey("linePoints"))
+                            {
+                                var linePoints = output["linePoints"] as List<object>;
+                                if (linePoints != null)
+                                {
+                                    if (ioEntity.outputs[index].linePoints == null || ioEntity.outputs[index].linePoints.Length != linePoints.Count)
+                                        ioEntity.outputs[index].linePoints = new Vector3[linePoints.Count];
+                                    for (var index2 = 0; index2 < linePoints.Count; index2++)
+                                    {
+                                        var linePoint = linePoints[index2] as Dictionary<string, object>;
+                                        // Get the relative positions (normalized) and convert it to an actual position.
+                                        var normalizedPos =
+                                            quaternionRotation * (new Vector3(Convert.ToSingle(linePoint["x"]),
+                                                Convert.ToSingle(linePoint["y"]) + heightAdj,
+                                                Convert.ToSingle(linePoint["z"]))) + startPos;
+                                        ioEntity.outputs[index].linePoints[index2] = normalizedPos;
+                                    }
+                                }
+                            }
+                            ioEntity.MarkDirtyForceUpdateOutputs();
+                        }
+                    }
+                }
             }
 
             return pastedEntities;
@@ -1268,7 +1464,7 @@ namespace Oxide.Plugins
 			if(data["protocol"] != null)
 				protocol = data["protocol"] as Dictionary<string, object>;
 			
-            return Paste(preloadData, protocol, startPos, player, stability);
+            return Paste(preloadData, protocol, startPos, player, stability, RotationCorrection, autoHeight ? heightAdj : 0);
         }
 
         private List<BaseEntity> TryPasteSlots(BaseEntity ent, Dictionary<string, object> structure)
