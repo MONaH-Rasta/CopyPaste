@@ -22,15 +22,15 @@ using Graphics = System.Drawing.Graphics;
  * Orange - Saving ContainerIOEntity
  * UIP88 - Turrets fix
  * bsdinis - Wire fix
- * nivex - Ownership option
+ * nivex - Ownership option, sign fix
+ * DezLife - CCTV fix
  * 
  */
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.1.25")]
+    [Info("Copy Paste", "misticos", "4.1.26")] // Wulf skipped 24 :(
     [Description("Copy and paste buildings to save them or move them")]
-
     public class CopyPaste : RustPlugin
     {
         private int _copyLayer =
@@ -330,7 +330,7 @@ namespace Oxide.Plugins
 
         private object CmdPasteBack(BasePlayer player, string[] args)
         {
-            var userIdString = (player == null) ? _serverId : player.UserIDString;
+            var userIdString = player == null ? _serverId : player.UserIDString;
 
             if (args.Length < 1)
                 return Lang("SYNTAX_PASTEBACK", userIdString);
@@ -705,19 +705,15 @@ namespace Oxide.Plugins
                     {"locked", sign.IsLocked()}
                 });
 
-                var signData = ((Dictionary<string, object>)data["sign"]);
+                var signData = (Dictionary<string, object>) data["sign"];
 
                 for (int num = 0; num < sign.textureIDs.Length; num++)
                 {
                     var textureId = sign.textureIDs[num];
-
                     if (textureId == 0)
-                    {
                         continue;
-                    }
 
                     var imageByte = FileStorage.server.Get(textureId, FileStorage.Type.png, sign.net.ID);
-
                     if (imageByte != null)
                     {
                         signData.Add($"texture{num}", Convert.ToBase64String(imageByte));
@@ -760,6 +756,17 @@ namespace Oxide.Plugins
                         {"authorizedPlayers", autoTurret.authorizedPlayers.Select(p => p.userid).ToList()}
                     });
                 }
+            }
+
+            var cctvRc = entity as CCTV_RC;
+            if (cctvRc != null)
+            {
+                data.Add("cctv", new Dictionary<string, object>
+                {
+                    {"yaw", cctvRc.yawAmount},
+                    {"pitch", cctvRc.pitchAmount},
+                    {"rcIdentifier", cctvRc.rcIdentifier}
+                });
             }
 
             var vendingMachine = entity as VendingMachine;
@@ -830,7 +837,7 @@ namespace Oxide.Plugins
                     ioData.Add("branchAmount", electricalBranch.branchAmount);
                 }
 
-                var counter = ioEntity.GetComponent<PowerCounter>();
+                var counter = ioEntity as PowerCounter;
                 if (counter != null)
                 {
                     ioData.Add("targetNumber", counter.GetTarget());
@@ -879,7 +886,8 @@ namespace Oxide.Plugins
             return maxHeight;
         }
 
-        private bool FindRayEntity(Vector3 sourcePos, Vector3 sourceDir, out Vector3 point, out BaseEntity entity, int rayLayer)
+        private bool FindRayEntity(Vector3 sourcePos, Vector3 sourceDir, out Vector3 point, out BaseEntity entity,
+            int rayLayer)
         {
             RaycastHit hitinfo;
             entity = null;
@@ -894,23 +902,21 @@ namespace Oxide.Plugins
             return true;
         }
 
-        private void FixSignage(Signage sign, byte[] imageBytes, int num)
+        private void FixSignage(Signage sign, byte[] imageBytes, int index)
         {
             if (!_signSizes.ContainsKey(sign.ShortPrefabName))
-            {
                 return;
-            }
 
-            int size = Mathf.Max(sign.paintableSources.Length, 1);
-
+            var size = Math.Max(sign.paintableSources.Length, 1);
             if (sign.textureIDs == null || sign.textureIDs.Length != size)
             {
                 Array.Resize(ref sign.textureIDs, size);
             }
 
-            var resizedImage = ImageResize(imageBytes, _signSizes[sign.ShortPrefabName].Width, _signSizes[sign.ShortPrefabName].Height);
+            var resizedImage = ImageResize(imageBytes, _signSizes[sign.ShortPrefabName].Width,
+                _signSizes[sign.ShortPrefabName].Height);
 
-            sign.textureIDs[num] = FileStorage.server.Store(resizedImage, FileStorage.Type.png, sign.net.ID);
+            sign.textureIDs[index] = FileStorage.server.Store(resizedImage, FileStorage.Type.png, sign.net.ID);
         }
 
         private object GetGround(Vector3 pos)
@@ -957,10 +963,10 @@ namespace Oxide.Plugins
         private Vector3 NormalizePosition(Vector3 initialPos, Vector3 currentPos, float diffRot)
         {
             var transformedPos = currentPos - initialPos;
-            var newX = (transformedPos.x * (float) Math.Cos(-diffRot)) +
-                       (transformedPos.z * (float) Math.Sin(-diffRot));
-            var newZ = (transformedPos.z * (float) Math.Cos(-diffRot)) -
-                       (transformedPos.x * (float) Math.Sin(-diffRot));
+            var newX = transformedPos.x * (float) Math.Cos(-diffRot) +
+                       transformedPos.z * (float) Math.Sin(-diffRot);
+            var newZ = transformedPos.z * (float) Math.Cos(-diffRot) -
+                       transformedPos.x * (float) Math.Sin(-diffRot);
 
             transformedPos.x = newX;
             transformedPos.z = newZ;
@@ -1378,6 +1384,16 @@ namespace Oxide.Plugins
                     cupboard.SendNetworkUpdate();
                 }
 
+                var cctvRc = entity as CCTV_RC;
+                if (cctvRc != null && data.ContainsKey("cctv"))
+                {
+                    var cctv = (Dictionary<string, object>) data["cctv"];
+                    cctvRc.yawAmount = Convert.ToSingle(cctv["yaw"]);
+                    cctvRc.pitchAmount = Convert.ToSingle(cctv["pitch"]);
+                    cctvRc.rcIdentifier = cctv["rcIdentifier"].ToString();
+                    cctvRc.SendNetworkUpdate();
+                }
+
                 var vendingMachine = entity as VendingMachine;
                 if (vendingMachine != null && data.ContainsKey("vendingmachine"))
                 {
@@ -1491,8 +1507,7 @@ namespace Oxide.Plugins
                         electricalBranch.branchAmount = Convert.ToInt32(ioData["branchAmount"]);
                     }
 
-                    // Realized counter.targetCounterNumber is private, leaving it in in case signature changes.
-                    var counter = ioEntity.GetComponentInParent<PowerCounter>();
+                    var counter = ioEntity as PowerCounter;
                     if (counter != null && ioData.ContainsKey("targetNumber"))
                     {
                         counter.targetCounterNumber = Convert.ToInt32(ioData["targetNumber"]);
@@ -1665,8 +1680,8 @@ namespace Oxide.Plugins
                 var rot = (Dictionary<string, object>) data["rot"];
 
                 data.Add("position",
-                    quaternionRotation * (new Vector3(Convert.ToSingle(pos["x"]), Convert.ToSingle(pos["y"]),
-                        Convert.ToSingle(pos["z"]))) + startPos);
+                    quaternionRotation * new Vector3(Convert.ToSingle(pos["x"]), Convert.ToSingle(pos["y"]),
+                        Convert.ToSingle(pos["z"])) + startPos);
                 data.Add("rotation",
                     Quaternion.EulerRotation(eulerRotation + new Vector3(Convert.ToSingle(rot["x"]),
                         Convert.ToSingle(rot["y"]), Convert.ToSingle(rot["z"]))));
@@ -1942,11 +1957,11 @@ namespace Oxide.Plugins
                 if (bestHeight is string)
                     return bestHeight;
 
-                heightAdj += ((float) bestHeight - startPos.y);
+                heightAdj += (float) bestHeight - startPos.y;
 
                 foreach (var entity in preloadData)
                 {
-                    var pos = ((Vector3) entity["position"]);
+                    var pos = (Vector3) entity["position"];
                     pos.y += heightAdj;
 
                     entity["position"] = pos;
@@ -2048,7 +2063,7 @@ namespace Oxide.Plugins
 
                     if ((code & 0x80) != 0)
                     {
-                        keyLock.keyCode = (code & 0x7F);
+                        keyLock.keyCode = code & 0x7F;
                         keyLock.firstKeyCreated = true;
                         keyLock.SetFlag(BaseEntity.Flags.Locked, true);
                     }
