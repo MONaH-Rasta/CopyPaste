@@ -1,4 +1,4 @@
-//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
+﻿//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
 //#define DEBUG
 
 using System;
@@ -22,13 +22,13 @@ using Graphics = System.Drawing.Graphics;
  * Orange - Saving ContainerIOEntity
  * UIP88 - Turrets fix
  * bsdinis - Wire fix
- * nivex - Ownership
+ * nivex - Ownership option
  * 
  */
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake & misticos", "4.1.21")]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake & misticos", "4.1.22")]
     [Description("Copy and paste buildings to save them or move them")]
 
     public class CopyPaste : RustPlugin
@@ -1054,7 +1054,7 @@ namespace Oxide.Plugins
                 var baseCombat = entity as BaseCombatEntity;
 
                 if (baseCombat != null)
-                    baseCombat.ChangeHealth(baseCombat.MaxHealth());
+                    baseCombat.SetHealth(baseCombat.MaxHealth());
 
                 pasteData.PastedEntities.AddRange(TryPasteSlots(entity, data, pasteData));
 
