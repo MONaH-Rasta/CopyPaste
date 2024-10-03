@@ -34,7 +34,7 @@ using Graphics = System.Drawing.Graphics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.1.35")]
+    [Info("Copy Paste", "misticos", "4.1.36")]
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : CovalencePlugin
     {
@@ -1109,6 +1109,7 @@ namespace Oxide.Plugins
                 if (buildingBlock != null)
                 {
                     buildingBlock.blockDefinition = PrefabAttribute.server.Find<Construction>(buildingBlock.prefabID);
+                    if (buildingBlock.skinID != 10220) buildingBlock.skinID = 0uL;
                     buildingBlock.SetGrade((BuildingGrade.Enum)data["grade"]);
                     if (!pasteData.Stability)
                         buildingBlock.grounded = true;
@@ -1135,12 +1136,20 @@ namespace Oxide.Plugins
                     }
                 }
 
-                entity.skinID = skinid;
+                if (buildingBlock == null)
+                    entity.skinID = skinid;
+
                 entity.Spawn();
 
                 var baseCombat = entity as BaseCombatEntity;
 
-                if (baseCombat != null)
+                if (buildingBlock != null)
+                {
+                    buildingBlock.SetHealthToMax();
+                    buildingBlock.SendNetworkUpdate();
+                    buildingBlock.UpdateSkin();
+                }
+                else if (baseCombat != null)
                     baseCombat.SetHealth(baseCombat.MaxHealth());
 
                 pasteData.PastedEntities.AddRange(TryPasteSlots(entity, data, pasteData));
