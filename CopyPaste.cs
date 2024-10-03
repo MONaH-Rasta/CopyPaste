@@ -1,4 +1,4 @@
-﻿//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
+//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
 //#define DEBUG
 
 using System;
@@ -28,7 +28,7 @@ using Graphics = System.Drawing.Graphics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake & misticos", "4.1.20")]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake & misticos", "4.1.21")]
     [Description("Copy and paste buildings to save them or move them")]
 
     public class CopyPaste : RustPlugin
@@ -353,8 +353,7 @@ namespace Oxide.Plugins
 
         private void UndoLoop(HashSet<BaseEntity> entities, BasePlayer player, int count = 0)
         {
-
-            foreach (var storageContainer in entities.OfType<StorageContainer>())
+            foreach (var storageContainer in entities.OfType<StorageContainer>().Where(x => !x.IsDestroyed))
             {
                 storageContainer.Kill();
             }
@@ -570,7 +569,7 @@ namespace Oxide.Plugins
             }
 
             var box = entity as StorageContainer;
-            if (box != null)
+            if (box?.inventory != null)
             {
                 var itemlist = new List<object>();
 
