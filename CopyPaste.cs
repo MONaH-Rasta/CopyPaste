@@ -34,7 +34,7 @@ using Graphics = System.Drawing.Graphics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.1.36")]
+    [Info("Copy Paste", "misticos", "4.1.37")]
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : CovalencePlugin
     {
@@ -597,6 +597,10 @@ namespace Oxide.Plugins
             if (buildingblock != null)
             {
                 data.Add("grade", buildingblock.grade);
+                if (buildingblock.customColour != 0)
+                {
+                    data.Add("customColour", buildingblock.customColour);
+                }
             }
 
             var box = entity as StorageContainer;
@@ -842,6 +846,7 @@ namespace Oxide.Plugins
                         { "connectedID", input.connectedTo.entityRef.uid.Value },
                         { "connectedToSlot", input.connectedToSlot },
                         { "niceName", input.niceName },
+                        { "wireColour", input.wireColour },
                         { "type", (int)input.type }
                     })
                     .Cast<object>()
@@ -857,6 +862,7 @@ namespace Oxide.Plugins
                         { "connectedID", output.connectedTo.entityRef.uid.Value },
                         { "connectedToSlot", output.connectedToSlot },
                         { "niceName", output.niceName },
+                        { "wireColour", output.wireColour },
                         { "type", (int)output.type },
                         { "linePoints", output.linePoints?.ToList() ?? new List<Vector3>() }
                     };
@@ -876,6 +882,7 @@ namespace Oxide.Plugins
                 if (counter != null)
                 {
                     ioData.Add("targetNumber", counter.GetTarget());
+                    ioData.Add("counterNumber", counter.counterNumber);
                 }
 
                 var timerSwitch = ioEntity as TimerSwitch;
@@ -1109,8 +1116,10 @@ namespace Oxide.Plugins
                 if (buildingBlock != null)
                 {
                     buildingBlock.blockDefinition = PrefabAttribute.server.Find<Construction>(buildingBlock.prefabID);
-                    if (buildingBlock.skinID != 10220) buildingBlock.skinID = 0uL;
-                    buildingBlock.SetGrade((BuildingGrade.Enum)data["grade"]);
+                    var grade = (BuildingGrade.Enum)Convert.ToInt32(data["grade"]);
+                    if (skinid != 0ul && !HasGrade(buildingBlock, grade, skinid))
+                        skinid = 0ul;
+                    buildingBlock.SetGrade(grade);
                     if (!pasteData.Stability)
                         buildingBlock.grounded = true;
                 }
@@ -1136,8 +1145,7 @@ namespace Oxide.Plugins
                     }
                 }
 
-                if (buildingBlock == null)
-                    entity.skinID = skinid;
+                entity.skinID = skinid;
 
                 entity.Spawn();
 
@@ -1146,8 +1154,12 @@ namespace Oxide.Plugins
                 if (buildingBlock != null)
                 {
                     buildingBlock.SetHealthToMax();
-                    buildingBlock.SendNetworkUpdate();
                     buildingBlock.UpdateSkin();
+                    buildingBlock.SendNetworkUpdate();
+                    buildingBlock.ResetUpkeepTime();
+                    object customColour;
+                    if (data.TryGetValue("customColour", out customColour))
+                        buildingBlock.SetCustomColour(Convert.ToUInt32(customColour));
                 }
                 else if (baseCombat != null)
                     baseCombat.SetHealth(baseCombat.MaxHealth());
@@ -1229,6 +1241,9 @@ namespace Oxide.Plugins
 
                             if (item.ContainsKey("text"))
                                 i.text = item["text"].ToString();
+
+                            if (item.ContainsKey("name"))
+                                i.name = item["name"]?.ToString();
 
                             if (item.ContainsKey("blueprintTarget"))
                             {
@@ -1373,6 +1388,9 @@ namespace Oxide.Plugins
 
                             if (itemJson.ContainsKey("text"))
                                 item.text = itemJson["text"].ToString();
+
+                            if (itemJson.ContainsKey("name"))
+                                item.name = itemJson["name"]?.ToString();
 
                             if (itemJson.ContainsKey("blueprintTarget"))
                             {
@@ -1678,9 +1696,15 @@ namespace Oxide.Plugins
                     }
 
                     var counter = ioEntity as PowerCounter;
-                    if (counter != null && ioData.ContainsKey("targetNumber"))
+                    if (counter != null)
                     {
-                        counter.targetCounterNumber = Convert.ToInt32(ioData["targetNumber"]);
+                        if (ioData.ContainsKey("targetNumber"))
+                            counter.targetCounterNumber = Convert.ToInt32(ioData["targetNumber"]);
+
+                        object counterNumber;
+                        counter.SetCounterNumber(ioData.TryGetValue("counterNumber", out counterNumber) ?
+                            Convert.ToInt32(counterNumber) :
+                            0);
                     }
 
                     var timer = ioEntity as TimerSwitch;
@@ -1778,6 +1802,10 @@ namespace Oxide.Plugins
                                     ioEntity2.inputs[connectedToSlot].connectedTo.Init();
 
                                     ioOutput.niceName = output["niceName"] as string;
+
+                                    object wireColour;
+                                    if (output.TryGetValue("wireColour", out wireColour))
+                                        ioOutput.wireColour = (WireTool.WireColour)Convert.ToInt32(wireColour);
 
                                     ioOutput.type = (IOEntity.IOType)Convert.ToInt32(output["type"]);
                                 }
@@ -2295,6 +2323,18 @@ namespace Oxide.Plugins
                 Convert.ToSingle(pos?["z"]));
 
             return TryPaste(startPos, filename, player, rotationCorrection, args, false).Item1;
+        }
+
+        private static bool HasGrade(BuildingBlock block, BuildingGrade.Enum grade, ulong skin)
+        {
+            foreach (var constructionGrade in block.blockDefinition.grades)
+            {
+                var baseGrade = constructionGrade.gradeBase;
+                if (baseGrade.type == grade && baseGrade.skin == skin)
+                    return true;
+            }
+
+            return false;
         }
 
         [Command("copy")]
