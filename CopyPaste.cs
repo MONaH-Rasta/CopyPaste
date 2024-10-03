@@ -29,7 +29,7 @@ using Graphics = System.Drawing.Graphics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.1.26")] // Wulf skipped 24 :(
+    [Info("Copy Paste", "misticos", "4.1.27")] // Wulf skipped 24 :(
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : RustPlugin
     {
@@ -417,7 +417,7 @@ namespace Oxide.Plugins
 
             var copyData = new CopyData
             {
-                FileName = filename,
+                Filename = filename,
                 CurrentLayer = currentLayer,
                 RotCor = rotationCorrection,
                 Range = range,
@@ -490,7 +490,7 @@ namespace Oxide.Plugins
             }
             else
             {
-                var path = _subDirectory + copyData.FileName;
+                var path = _subDirectory + copyData.Filename;
                 var datafile = Interface.Oxide.DataFileSystem.GetDatafile(path);
 
                 datafile.Clear();
@@ -520,11 +520,11 @@ namespace Oxide.Plugins
 
                 Interface.Oxide.DataFileSystem.SaveDatafile(path);
 
-                SendReply(copyData.Player, Lang("COPY_SUCCESS", copyData.Player.UserIDString, copyData.FileName));
+                SendReply(copyData.Player, Lang("COPY_SUCCESS", copyData.Player.UserIDString, copyData.Filename));
 
                 copyData.Callback?.Invoke();
 
-                Interface.CallHook("OnCopyFinished", copyData.RawData);
+                Interface.CallHook("OnCopyFinished", copyData.RawData, copyData.Filename);
             }
         }
 
@@ -976,7 +976,7 @@ namespace Oxide.Plugins
 
         private void Paste(ICollection<Dictionary<string, object>> entities, Dictionary<string, object> protocol,
             bool ownership, Vector3 startPos, BasePlayer player, bool stability, float rotationCorrection,
-            float heightAdj, bool auth, Action callback)
+            float heightAdj, bool auth, Action callback, string filename)
         {
 
             var ioEntities = new Dictionary<uint, Dictionary<string, object>>();
@@ -1000,7 +1000,8 @@ namespace Oxide.Plugins
                 Stability = stability,
                 Auth = auth,
                 Ownership = ownership,
-                Callback = callback
+                Callback = callback,
+                Filename = filename
             };
 
             NextTick(() => PasteLoop(pasteData));
@@ -1058,7 +1059,6 @@ namespace Oxide.Plugins
                     buildingBlock.SetGrade((BuildingGrade.Enum) data["grade"]);
                     if (!pasteData.Stability)
                         buildingBlock.grounded = true;
-
                 }
 
                 var decayEntity = entity as DecayEntity;
@@ -1658,7 +1658,7 @@ namespace Oxide.Plugins
 
                 pasteData.Callback?.Invoke();
 
-                Interface.CallHook("OnPasteFinished", pasteData.PastedEntities);
+                Interface.CallHook("OnPasteFinished", pasteData.PastedEntities, pasteData.Filename);
             }
         }
 
@@ -1982,7 +1982,7 @@ namespace Oxide.Plugins
                 protocol = data["protocol"] as Dictionary<string, object>;
 
             Paste(preloadData, protocol, ownership, startPos, player, stability, rotationCorrection,
-                autoHeight ? heightAdj : 0, auth, callback);
+                autoHeight ? heightAdj : 0, auth, callback, filename);
             return true;
         }
 
@@ -2858,7 +2858,7 @@ namespace Oxide.Plugins
             public Vector3 SourceRot;
             public Action Callback;
 
-            public string FileName;
+            public string Filename;
             public int CurrentLayer;
             public float RotCor;
             public float Range;
@@ -2877,6 +2877,7 @@ namespace Oxide.Plugins
         {
             public ICollection<Dictionary<string, object>> Entities;
             public List<BaseEntity> PastedEntities = new List<BaseEntity>();
+            public string Filename;
 
             public Dictionary<uint, Dictionary<string, object>> IoEntities =
                 new Dictionary<uint, Dictionary<string, object>>();
