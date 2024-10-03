@@ -1,5 +1,4 @@
-﻿//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
-
+//If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
 //#define DEBUG
 
 using System;
@@ -35,7 +34,7 @@ using Graphics = System.Drawing.Graphics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.1.32")]
+    [Info("Copy Paste", "misticos", "4.1.33")]
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : CovalencePlugin
     {
@@ -535,7 +534,7 @@ namespace Oxide.Plugins
 
                 copyData.Callback?.Invoke();
 
-                Interface.CallHook("OnCopyFinished", copyData.RawData, copyData.Filename);
+                Interface.CallHook("OnCopyFinished", copyData.RawData, copyData.Filename, copyData.Player, copyData.SourcePos);
             }
         }
 
@@ -1478,10 +1477,14 @@ namespace Oxide.Plugins
                 {
                     if (data.ContainsKey("points"))
                     {
-                        foreach (Dictionary<string, object> point in data["points"] as List<object>)
+                        var points = data["points"] as List<object>;
+                        if (points != null && points.Count > 0)
                         {
-                            lights.points.Add(new AdvancedChristmasLights.pointEntry
-                                { normal = (Vector3)point["normal"], point = (Vector3)point["point"] });
+                            foreach (Dictionary<string, object> point in points)
+                            {
+                                lights.points.Add(new AdvancedChristmasLights.pointEntry
+                                    { normal = (Vector3)point["normal"], point = (Vector3)point["point"] });
+                            }
                         }
                     }
 
@@ -1794,7 +1797,7 @@ namespace Oxide.Plugins
 
                 pasteData.CallbackFinished?.Invoke();
 
-                Interface.CallHook("OnPasteFinished", pasteData.PastedEntities, pasteData.Filename);
+                Interface.CallHook("OnPasteFinished", pasteData.PastedEntities, pasteData.Filename, pasteData.Player, pasteData.StartPos);
             }
         }
 
