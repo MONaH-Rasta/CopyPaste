@@ -10,6 +10,7 @@ using ProtoBuf;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -17,7 +18,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.0.3", ResourceId = 716)]
+    [Info("Copy Paste", "Reneb & MiRror & Misstake", "4.1.0", ResourceId = 716)]
     [Description("Copy and paste buildings to save them or move them")]
 	
     public class CopyPaste : RustPlugin
@@ -233,7 +234,7 @@ namespace Oxide.Plugins
 
         //Other methods
 
-        private object CheckCollision(List<Dictionary<string, object>> entities, Vector3 startPos, float radius)
+        private object CheckCollision(HashSet<Dictionary<string, object>> entities, Vector3 startPos, float radius)
         {
             foreach (var entityobj in entities)
             {
@@ -283,18 +284,38 @@ namespace Oxide.Plugins
             if (!lastPastes.ContainsKey(userIDString))
                 return Lang("NO_PASTED_STRUCTURE", userIDString);
 
-            foreach (var entity in lastPastes[userIDString].Pop())
-            {
-                if (entity == null || entity.IsDestroyed)
-                    continue;
+            HashSet<BaseEntity> entities = new HashSet<BaseEntity>(lastPastes[userIDString].Pop().ToList());
 
-                entity.Kill();
-            }
+            DoUndo(entities);
 
             if (lastPastes[userIDString].Count == 0)
                 lastPastes.Remove(userIDString);
 
             return true;
+        }
+
+        private void DoUndo(HashSet<BaseEntity> entities, int count = 0)
+        {
+
+            entities
+                .Take(100)
+                .ToList()
+                .ForEach(p =>
+            {
+                entities.Remove(p);
+                if (p != null && !p.IsDestroyed)
+                    p.Kill();
+            });
+
+            // If it gets stuck in infinite loop break the loop.
+            if (entities.Count == count)
+            {
+                PrintError("Undo cancelled because of infinite loop.");
+                return;
+            }
+
+            if(entities.Count > 0)
+                NextTick(() => DoUndo(entities, entities.Count));
         }
 
         private object Copy(Vector3 sourcePos, Vector3 sourceRot, string filename, float RotationCorrection, CopyMechanics copyMechanics, float range, bool saveTree, bool saveShare, bool eachToEach)
@@ -621,7 +642,7 @@ namespace Oxide.Plugins
             return data;
         }
 
-        private object FindBestHeight(List<Dictionary<string, object>> entities, Vector3 startPos)
+        private object FindBestHeight(HashSet<Dictionary<string, object>> entities, Vector3 startPos)
         {
             float maxHeight = 0f;
 
@@ -724,8 +745,10 @@ namespace Oxide.Plugins
             return transformedPos;
         }
 
-        private List<BaseEntity> Paste(List<Dictionary<string, object>> entities, Dictionary<string, object> protocol, Vector3 startPos, BasePlayer player, bool stability, float RotationCorrection, float heightAdj)
+        private List<BaseEntity> Paste(ICollection<Dictionary<string, object>> entities, Dictionary<string, object> protocol, Vector3 startPos, BasePlayer player, bool stability, float RotationCorrection, float heightAdj)
         {
+
+            var ioEntities = new Dictionary<uint, Dictionary<string, object>>();
             uint buildingID = 0;
             var pastedEntities = new List<BaseEntity>();
 			
@@ -733,10 +756,24 @@ namespace Oxide.Plugins
 			
 			bool isItemReplace = !protocol.ContainsKey("items");
 
-            var ioEntities = new Dictionary<uint, Dictionary<string, object>>();
+            var eulerRotation = new Vector3(0f, RotationCorrection, 0f);
+            var quaternionRotation = Quaternion.Euler(eulerRotation);
 
-            foreach (var data in entities)
+            DoPaste(entities, startPos, player, stability, quaternionRotation, ioEntities, buildingID, pastedEntities, isItemReplace, heightAdj);
+
+            return pastedEntities;
+        }
+
+        private void DoPaste(ICollection<Dictionary<string, object>> entities,
+            Vector3 startPos, BasePlayer player, bool stability,
+            Quaternion rotation, Dictionary<uint, Dictionary<string, object>> ioEntities, uint buildingID, List<BaseEntity> pastedEntities, bool isItemReplace, float heightAdj)
+        {
+            var todo = entities.Take(100).ToArray();
+
+
+            foreach (var data in todo)
             {
+                entities.Remove(data);
                 string prefabname = (string)data["prefabname"];
                 ulong skinid = ulong.Parse(data["skinid"].ToString());
                 Vector3 pos = (Vector3)data["position"];
@@ -771,6 +808,7 @@ namespace Oxide.Plugins
 
                     if (!stability)
                         buildingBlock.grounded = true;
+
                 }
 
                 DecayEntity decayEntity = entity.GetComponentInParent<DecayEntity>();
@@ -811,15 +849,15 @@ namespace Oxide.Plugins
 
                     foreach (var itemDef in items)
                     {
-                       var item = itemDef as Dictionary<string, object>;
+                        var item = itemDef as Dictionary<string, object>;
                         var itemid = Convert.ToInt32(item["id"]);
                         var itemamount = Convert.ToInt32(item["amount"]);
                         var itemskin = ulong.Parse(item["skinid"].ToString());
                         var itemcondition = Convert.ToSingle(item["condition"]);
 
-						if(isItemReplace)
-							itemid = GetItemID(itemid);
-						
+                        if (isItemReplace)
+                            itemid = GetItemID(itemid);
+
                         var i = ItemManager.CreateByItemID(itemid, itemamount, itemskin);
 
                         if (i != null)
@@ -830,14 +868,14 @@ namespace Oxide.Plugins
                                 i.text = item["text"].ToString();
 
                             if (item.ContainsKey("blueprintTarget"))
-							{
-								int blueprintTarget = Convert.ToInt32(item["blueprintTarget"]);
-								
-								if(isItemReplace)
-									blueprintTarget = GetItemID(blueprintTarget);
-								
+                            {
+                                int blueprintTarget = Convert.ToInt32(item["blueprintTarget"]);
+
+                                if (isItemReplace)
+                                    blueprintTarget = GetItemID(blueprintTarget);
+
                                 i.blueprintTarget = blueprintTarget;
-							}
+                            }
                             if (item.ContainsKey("magazine"))
                             {
                                 var heldent = i.GetHeldEntity();
@@ -849,12 +887,12 @@ namespace Oxide.Plugins
                                     if (projectiles != null)
                                     {
                                         var magazine = item["magazine"] as Dictionary<string, object>;
-                                        var ammotype = int.Parse(magazine.Keys.ToArray()[0]);									
+                                        var ammotype = int.Parse(magazine.Keys.ToArray()[0]);
                                         var ammoamount = int.Parse(magazine[ammotype.ToString()].ToString());
-										
-										if(isItemReplace)
-											ammotype = GetItemID(ammotype);	
-										
+
+                                        if (isItemReplace)
+                                            ammotype = GetItemID(ammotype);
+
                                         projectiles.primaryMagazine.ammoType = ItemManager.FindItemDefinition(ammotype);
                                         projectiles.primaryMagazine.contents = ammoamount;
                                     }
@@ -869,11 +907,11 @@ namespace Oxide.Plugins
                                         {
                                             var contents = itemContains as Dictionary<string, object>;
 
-											int contentsItemID = Convert.ToInt32(contents["id"]);
-											
-											if(isItemReplace)
-												contentsItemID = GetItemID(contentsItemID);
-											
+                                            int contentsItemID = Convert.ToInt32(contents["id"]);
+
+                                            if (isItemReplace)
+                                                contentsItemID = GetItemID(contentsItemID);
+
                                             i.contents.AddItem(ItemManager.FindItemDefinition(contentsItemID), Convert.ToInt32(contents["amount"]));
                                         }
                                     }
@@ -988,15 +1026,15 @@ namespace Oxide.Plugins
                             orderInfo["itemToSellIsBP"] = false;
                         }
 
-						int itemToSellID = Convert.ToInt32(orderInfo["itemToSellID"]),
-							currencyID	 = Convert.ToInt32(orderInfo["currencyID"]);
-						
-						if(isItemReplace)
-						{
-							itemToSellID = GetItemID(itemToSellID);
-							currencyID   = GetItemID(currencyID);
-						}
-						
+                        int itemToSellID = Convert.ToInt32(orderInfo["itemToSellID"]),
+                            currencyID = Convert.ToInt32(orderInfo["currencyID"]);
+
+                        if (isItemReplace)
+                        {
+                            itemToSellID = GetItemID(itemToSellID);
+                            currencyID = GetItemID(currencyID);
+                        }
+
                         vendingMachine.sellOrders.sellOrders.Add(new ProtoBuf.VendingMachine.SellOrder()
                         {
                             ShouldPool = false,
@@ -1080,102 +1118,112 @@ namespace Oxide.Plugins
 
                 pastedEntities.Add(entity);
             }
-
-            // For IO connection the new ID is needed so linking is performed after the paste is done.
-            foreach (var ioData in ioEntities.Values)
+            if(entities.Count > 0)
+                NextTick(() => DoPaste(entities, startPos, player, stability, rotation, ioEntities, buildingID, pastedEntities, isItemReplace, heightAdj));
+            else
             {
-                var eulerRotation = new Vector3(0f, RotationCorrection, 0f);
-                var quaternionRotation = Quaternion.EulerRotation(eulerRotation);
-
-                if (!ioData.ContainsKey("entity"))
-                    continue;
-
-                var ioEntity = ioData["entity"] as IOEntity;
-
-                List<object> inputs = null;
-                if (ioData.ContainsKey("inputs"))
-                    inputs = ioData["inputs"] as List<object>;
-
-                if (inputs != null && inputs.Count > 0)
-                {
-                    for (int index = 0; index < inputs.Count; index++)
-                    {
-                        var input = inputs[index] as Dictionary<string, object>;
-                        uint oldId = Convert.ToUInt32(input["connectedID"]);
-
-                        if (ioEntities.ContainsKey(oldId))
+                Stopwatch sw = Stopwatch.StartNew();
+                if (stability)
+                    pastedEntities.OfType<BuildingBlock>()
+                        .Where(p => !p.PrefabName.Contains("foundation"))
+                        .ToList()
+                        .ForEach(p =>
                         {
-                            if (ioEntity.inputs[index] == null)
-                                ioEntity.inputs[index] = new IOEntity.IOSlot();
+                            p.grounded = false;
+                            p.UpdateStability();
+                        });
 
-                            Dictionary<string, object> ioConnection = ioEntities[oldId];
-
-                            ioEntity.inputs[index].connectedTo.entityRef.uid = Convert.ToUInt32(ioConnection["newId"]);
-                            ioEntity.inputs[index].connectedToSlot = Convert.ToInt32(input["connectedToSlot"]);
-                            ioEntity.inputs[index].niceName = input["niceName"] as string;
-                            ioEntity.inputs[index].type = (IOEntity.IOType)input["type"];
-                        }
-
-
-                    }
-                }
-
-                List<object> outputs = null;
-                if (ioData.ContainsKey("outputs"))
-                    outputs = ioData["outputs"] as List<object>;
-
-                if (outputs != null && outputs.Count > 0)
+                foreach (var ioData in ioEntities.Values)
                 {
-                    for (int index = 0; index < outputs.Count; index++)
+
+                    if (!ioData.ContainsKey("entity"))
+                        continue;
+
+                    var ioEntity = ioData["entity"] as IOEntity;
+
+                    List<object> inputs = null;
+                    if (ioData.ContainsKey("inputs"))
+                        inputs = ioData["inputs"] as List<object>;
+
+                    if (inputs != null && inputs.Count > 0)
                     {
-                        var output = outputs[index] as Dictionary<string, object>;
-                        var connectedOldId = Convert.ToUInt32(output["connectedID"]);
-
-                        if (ioEntities.ContainsKey(connectedOldId))
+                        for (int index = 0; index < inputs.Count; index++)
                         {
-                            if (ioEntity.outputs[index] == null)
-                                ioEntity.outputs[index] = new IOEntity.IOSlot();
+                            var input = inputs[index] as Dictionary<string, object>;
+                            uint oldId = Convert.ToUInt32(input["connectedID"]);
 
-                            Dictionary<string, object> ioConnection = ioEntities[connectedOldId];
-
-                            ioEntity.outputs[index].connectedTo.entityRef.uid = Convert.ToUInt32(ioConnection["newId"]);
-                            ioEntity.outputs[index].connectedToSlot = Convert.ToInt32(output["connectedToSlot"]);
-                            ioEntity.outputs[index].niceName = output["niceName"] as string;
-                            ioEntity.outputs[index].type = (IOEntity.IOType)output["type"];
-
-                            if (output.ContainsKey("linePoints"))
+                            if (ioEntities.ContainsKey(oldId))
                             {
-                                var linePoints = output["linePoints"] as List<object>;
-                                if (linePoints != null)
+                                if (ioEntity.inputs[index] == null)
+                                    ioEntity.inputs[index] = new IOEntity.IOSlot();
+
+                                Dictionary<string, object> ioConnection = ioEntities[oldId];
+
+                                ioEntity.inputs[index].connectedTo.entityRef.uid = Convert.ToUInt32(ioConnection["newId"]);
+                                ioEntity.inputs[index].connectedToSlot = Convert.ToInt32(input["connectedToSlot"]);
+                                ioEntity.inputs[index].niceName = input["niceName"] as string;
+                                ioEntity.inputs[index].type = (IOEntity.IOType)input["type"];
+                            }
+
+
+                        }
+                    }
+
+                    List<object> outputs = null;
+                    if (ioData.ContainsKey("outputs"))
+                        outputs = ioData["outputs"] as List<object>;
+
+                    if (outputs != null && outputs.Count > 0)
+                    {
+                        for (int index = 0; index < outputs.Count; index++)
+                        {
+                            var output = outputs[index] as Dictionary<string, object>;
+                            var connectedOldId = Convert.ToUInt32(output["connectedID"]);
+
+                            if (ioEntities.ContainsKey(connectedOldId))
+                            {
+                                if (ioEntity.outputs[index] == null)
+                                    ioEntity.outputs[index] = new IOEntity.IOSlot();
+
+                                Dictionary<string, object> ioConnection = ioEntities[connectedOldId];
+
+                                ioEntity.outputs[index].connectedTo.entityRef.uid = Convert.ToUInt32(ioConnection["newId"]);
+                                ioEntity.outputs[index].connectedToSlot = Convert.ToInt32(output["connectedToSlot"]);
+                                ioEntity.outputs[index].niceName = output["niceName"] as string;
+                                ioEntity.outputs[index].type = (IOEntity.IOType)output["type"];
+
+                                if (output.ContainsKey("linePoints"))
                                 {
-                                    if (ioEntity.outputs[index].linePoints == null || ioEntity.outputs[index].linePoints.Length != linePoints.Count)
-                                        ioEntity.outputs[index].linePoints = new Vector3[linePoints.Count];
-                                    for (var index2 = 0; index2 < linePoints.Count; index2++)
+                                    var linePoints = output["linePoints"] as List<object>;
+                                    if (linePoints != null)
                                     {
-                                        var linePoint = linePoints[index2] as Dictionary<string, object>;
-                                        // Get the relative positions (normalized) and convert it to an actual position.
-                                        var normalizedPos =
-                                            quaternionRotation * (new Vector3(Convert.ToSingle(linePoint["x"]),
-                                                Convert.ToSingle(linePoint["y"]) + heightAdj,
-                                                Convert.ToSingle(linePoint["z"]))) + startPos;
-                                        ioEntity.outputs[index].linePoints[index2] = normalizedPos;
+                                        if (ioEntity.outputs[index].linePoints == null || ioEntity.outputs[index].linePoints.Length != linePoints.Count)
+                                            ioEntity.outputs[index].linePoints = new Vector3[linePoints.Count];
+                                        for (var index2 = 0; index2 < linePoints.Count; index2++)
+                                        {
+                                            var linePoint = linePoints[index2] as Dictionary<string, object>;
+                                            // Get the relative positions (normalized) and convert it to an actual position.
+                                            var normalizedPos =
+                                                rotation * (new Vector3(Convert.ToSingle(linePoint["x"]),
+                                                    Convert.ToSingle(linePoint["y"]) + heightAdj,
+                                                    Convert.ToSingle(linePoint["z"]))) + startPos;
+                                            ioEntity.outputs[index].linePoints[index2] = normalizedPos;
+                                        }
                                     }
                                 }
+                                ioEntity.MarkDirtyForceUpdateOutputs();
                             }
-                            ioEntity.MarkDirtyForceUpdateOutputs();
                         }
                     }
                 }
             }
-
-            return pastedEntities;
         }
 
-        private List<Dictionary<string, object>> PreLoadData(List<object> entities, Vector3 startPos, float RotationCorrection, bool deployables, bool inventories, bool auth, bool vending)
+        private HashSet<Dictionary<string, object>> PreLoadData(List<object> entities, Vector3 startPos, float RotationCorrection, bool deployables, bool inventories, bool auth, bool vending)
         {
             var eulerRotation = new Vector3(0f, RotationCorrection, 0f);
             var quaternionRotation = Quaternion.EulerRotation(eulerRotation);
-            var preloaddata = new List<Dictionary<string, object>>();
+            var preloaddata = new HashSet<Dictionary<string, object>>();
 
             foreach (var entity in entities)
             {
