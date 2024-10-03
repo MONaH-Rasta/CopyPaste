@@ -34,7 +34,7 @@ using Graphics = System.Drawing.Graphics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.1.34")]
+    [Info("Copy Paste", "misticos", "4.1.35")]
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : CovalencePlugin
     {
@@ -839,7 +839,7 @@ namespace Oxide.Plugins
                 var ioData = new Dictionary<string, object>();
                 var inputs = ioEntity.inputs.Select(input => new Dictionary<string, object>
                     {
-                        { "connectedID", input.connectedTo.entityRef.uid },
+                        { "connectedID", input.connectedTo.entityRef.uid.Value },
                         { "connectedToSlot", input.connectedToSlot },
                         { "niceName", input.niceName },
                         { "type", (int)input.type }
@@ -854,7 +854,7 @@ namespace Oxide.Plugins
                 {
                     var ioConnection = new Dictionary<string, object>
                     {
-                        { "connectedID", output.connectedTo.entityRef.uid },
+                        { "connectedID", output.connectedTo.entityRef.uid.Value },
                         { "connectedToSlot", output.connectedToSlot },
                         { "niceName", output.niceName },
                         { "type", (int)output.type },
@@ -865,7 +865,7 @@ namespace Oxide.Plugins
                 }
 
                 ioData.Add("outputs", outputs);
-                ioData.Add("oldID", ioEntity.net.ID);
+                ioData.Add("oldID", ioEntity.net.ID.Value);
                 var electricalBranch = ioEntity as ElectricalBranch;
                 if (electricalBranch != null)
                 {
@@ -1615,7 +1615,10 @@ namespace Oxide.Plugins
                     object oldIdObject;
                     if (ioData.TryGetValue("oldID", out oldIdObject))
                     {
-                        var oldId = Convert.ToUInt32(oldIdObject);
+#if DEBUG
+                        Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1619");
+#endif
+                        var oldId = Convert.ToUInt64(oldIdObject);
                         pasteData.IoEntities.Add(oldId, ioData);
                     }
                 }
@@ -1705,7 +1708,10 @@ namespace Oxide.Plugins
                             if (!input.TryGetValue("connectedID", out oldIdObject))
                                 continue;
 
-                            var oldId = Convert.ToUInt32(oldIdObject);
+#if DEBUG
+                            Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1712");
+#endif
+                            var oldId = Convert.ToUInt64(oldIdObject);
 
                             if (oldId != 0 && pasteData.IoEntities.ContainsKey(oldId))
                             {
@@ -1734,7 +1740,10 @@ namespace Oxide.Plugins
                         for (var index = 0; index < outputs.Count; index++)
                         {
                             var output = outputs[index] as Dictionary<string, object>;
-                            var oldId = Convert.ToUInt32(output["connectedID"]);
+#if DEBUG
+                            Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1744");
+#endif
+                            var oldId = Convert.ToUInt64(output["connectedID"]);
 
                             if (oldId != 0 && pasteData.IoEntities.ContainsKey(oldId))
                             {
@@ -3063,8 +3072,8 @@ namespace Oxide.Plugins
             public List<BaseEntity> PastedEntities = new List<BaseEntity>();
             public string Filename;
 
-            public Dictionary<uint, Dictionary<string, object>> IoEntities =
-                new Dictionary<uint, Dictionary<string, object>>();
+            public Dictionary<ulong, Dictionary<string, object>> IoEntities =
+                new Dictionary<ulong, Dictionary<string, object>>();
 
             public IPlayer Player;
             public BasePlayer BasePlayer;
