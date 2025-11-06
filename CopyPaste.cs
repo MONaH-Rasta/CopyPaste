@@ -40,7 +40,7 @@ using System.Diagnostics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.2.4")]
+    [Info("Copy Paste", "misticos", "4.2.5")]
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : CovalencePlugin
     {
@@ -1026,7 +1026,7 @@ namespace Oxide.Plugins
                 {
                     data.Add("cupboard", new Dictionary<string, object>
                     {
-                        { "authorizedPlayers", cupboard.authorizedPlayers.Select(y => y.userid).ToList() }
+                        { "authorizedPlayers", cupboard.authorizedPlayers.ToList() }
                     });
                 }
 
@@ -1036,7 +1036,7 @@ namespace Oxide.Plugins
                 {
                     data.Add("autoturret", new Dictionary<string, object>
                     {
-                        { "authorizedPlayers", autoTurret.authorizedPlayers.Select(p => p.userid).ToList() }
+                        { "authorizedPlayers", autoTurret.authorizedPlayers.ToList() }
                     });
                 }
             }
@@ -2189,11 +2189,7 @@ namespace Oxide.Plugins
 
                 foreach (var userId in authorizedPlayers)
                 {
-                    autoTurret.authorizedPlayers.Add(new PlayerNameID
-                    {
-                        userid = userId,
-                        username = "Player"
-                    });
+                    autoTurret.authorizedPlayers.Add(userId);
                 }
 
                 autoTurret.SendNetworkUpdate();
@@ -2475,11 +2471,7 @@ namespace Oxide.Plugins
 
                 foreach (var userId in authorizedPlayers)
                 {
-                    cupboard.authorizedPlayers.Add(new PlayerNameID
-                    {
-                        userid = userId,
-                        username = "Player"
-                    });
+                    cupboard.authorizedPlayers.Add(userId);
                 }
 
                 cupboard.SendNetworkUpdate();
