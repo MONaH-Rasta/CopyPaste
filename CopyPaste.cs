@@ -40,7 +40,7 @@ using System.Diagnostics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.2.5")]
+    [Info("Copy Paste", "misticos", "4.2.6")]
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : CovalencePlugin
     {
@@ -965,6 +965,17 @@ namespace Oxide.Plugins
                 ExtractTextures(data, paintedItemStorageEntity.GetContentCRCs, entity, FileStorage.Type.png);
             }
 
+            var shutterFrame = entity as ShutterFrame;
+            if (shutterFrame != null)
+                data.Add("isShutterOpen", shutterFrame.IsShutterOpen);
+
+            var ornateFrame = entity as OrnateFrame;
+            if (ornateFrame != null)
+            {
+                data.Add("frameText", ornateFrame.FrameText);
+                data.Add("textColour", SerializeUnityEngineColor(ornateFrame.TextColour));
+            }
+
             var lights = entity as ChristmasLights;
             if (lights != null)
             {
@@ -1004,6 +1015,14 @@ namespace Oxide.Plugins
             if (mannequin != null)
             {
                 data.Add("poseIndex", mannequin.PoseIndex);
+            }
+
+            var partyBalloon = entity as PartyBalloon;
+            if (partyBalloon != null)
+            {
+                data.Add("balloonText", partyBalloon.BalloonText);
+                data.Add("balloonColour", SerializeUnityEngineColor(partyBalloon.BalloonColour));
+                data.Add("textColour", SerializeUnityEngineColor(partyBalloon.TextColour));
             }
 
             if (copyData.SaveShare)
@@ -1993,12 +2012,18 @@ namespace Oxide.Plugins
                         entity.SetParent(parent);
 
                     // Skip OnDeployed() for entities that don't properly handle null "deployedBy" or "fromItem.info"
-                    if (entity is not CustomDoorManipulator && entity is not AutoTurret &&
-                        entity is not GrowableEntity && entity is not Signage)
+                    if (entity is Signage signage)
+                    {
+                        signage.AddToEasel(parent);
+                    }
+                    else if (entity is PhotoFrame photo)
+                    {
+                        photo.AddToEasel(parent);
+                    }
+                    else if (entity is not CustomDoorManipulator and not AutoTurret and not GrowableEntity)
                     {
                         entity.OnDeployed(parent, null, _emptyItem);
                     }
-
 
                     transform.localPosition = localPos;
                     transform.localRotation = localRot;
@@ -2358,6 +2383,28 @@ namespace Oxide.Plugins
                 }
             }
 
+            var shutterFrame = entity as ShutterFrame;
+            if (shutterFrame != null)
+            {
+                if (data.TryGetValue("isShutterOpen", out object value))
+                    shutterFrame.IsShutterOpen = Convert.ToBoolean(value);
+            }
+
+            var ornateFrame = entity as OrnateFrame;
+            if (ornateFrame != null)
+            {
+                object value;
+                if (data.TryGetValue("frameText", out value))
+                {
+                    var frameText = value.ToString();
+                    if (!String.IsNullOrEmpty(frameText))
+                        ornateFrame.FrameText = frameText;
+                }
+
+                if (data.TryGetValue("textColour", out value))
+                    ornateFrame.TextColour = DeserializeUnityEngineColor(value);
+            }
+
             var lights = entity as ChristmasLights;
             if (lights != null)
             {
@@ -2432,6 +2479,24 @@ namespace Oxide.Plugins
                 {
                     mannequin.PoseIndex = Convert.ToInt32(data["poseIndex"]);
                 }
+            }
+
+            var partyBalloon = entity as PartyBalloon;
+            if (partyBalloon != null)
+            {
+                object value;
+                if (data.TryGetValue("balloonText", out value))
+                {
+                    var balloonText = value.ToString();
+                    if (!String.IsNullOrEmpty(balloonText))
+                        partyBalloon.BalloonText = balloonText;
+                }
+
+                if (data.TryGetValue("balloonColour", out value))
+                    partyBalloon.BalloonColour = DeserializeUnityEngineColor(value);
+
+                if (data.TryGetValue("textColour", out value))
+                    partyBalloon.TextColour = DeserializeUnityEngineColor(value);
             }
 
             var sleepingBag = entity as SleepingBag;
@@ -4374,6 +4439,36 @@ namespace Oxide.Plugins
                 return Convert.ToBase64String(Facepunch.Utility.Compression.Compress(Encoding.ASCII.GetBytes(starstring)));
             }
             return starstring;
+        }
+
+        private Dictionary<string, object> SerializeUnityEngineColor(UnityEngine.Color color)
+        {
+            return new Dictionary<string, object>
+            {
+                { "r", color.r.ToString() },
+                { "g", color.g.ToString() },
+                { "b", color.b.ToString() },
+                { "a", color.a.ToString() },
+            };
+        }
+
+        private UnityEngine.Color DeserializeUnityEngineColor(object rawData)
+        {
+            if (rawData == null)
+                return UnityEngine.Color.white;
+
+            var data = rawData as Dictionary<string, object>;
+
+            if (data == null)
+                return UnityEngine.Color.white;
+
+            object val;
+            float r = data.TryGetValue("r", out val) && val != null ? Convert.ToSingle(val) : 1f;
+            float g = data.TryGetValue("g", out val) && val != null ? Convert.ToSingle(val) : 1f;
+            float b = data.TryGetValue("b", out val) && val != null ? Convert.ToSingle(val) : 1f;
+            float a = data.TryGetValue("a", out val) && val != null ? Convert.ToSingle(val) : 1f;
+
+            return new UnityEngine.Color(r, g, b, a);
         }
 
         private object TryPasteBack(string filename, IPlayer player, string[] args)
