@@ -35,12 +35,13 @@ using System.Diagnostics;
  * bmgjet - Wallpapers, pattern firework, industrial
  * DezLife - CCTV fix
  * Wulf - Skipping 4.1.24 :D
+ * MediocratyItself - added sizing/scaling saving feature
  * 
  */
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.2.6")]
+    [Info("Copy Paste", "misticos", "4.2.7")]
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : CovalencePlugin
     {
@@ -833,6 +834,17 @@ namespace Oxide.Plugins
                 },
                 { "ownerid", entity.OwnerID }
             };
+
+            if (entity.networkEntityScale)
+            {
+                var scale = entity.transform.localScale;
+                data.Add("scale", new Dictionary<string, object>
+                {
+                    { "x", scale.x.ToString() },
+                    { "y", scale.y.ToString() },
+                    { "z", scale.z.ToString() }
+                });
+            }
 
             if (entity.HasParent())
             {
@@ -2034,6 +2046,18 @@ namespace Oxide.Plugins
             {
                 transform.position = pos;
                 transform.rotation = rot;
+            }
+
+            if (data.TryGetValue("scale", out var scaleObj) && scaleObj is Dictionary<string, object> scaleData)
+            {
+                var scale = new Vector3(
+                    Convert.ToSingle(scaleData["x"]),
+                    Convert.ToSingle(scaleData["y"]),
+                    Convert.ToSingle(scaleData["z"])
+                );
+
+                entity.transform.localScale = scale;
+                entity.networkEntityScale = true;
             }
 
             if (pasteData.BasePlayer != null)
