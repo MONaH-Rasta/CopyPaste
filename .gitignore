@@ -1,6 +1,6 @@
 #Files
 *.csproj
-*.sln
+*.sln*
 
 #Folders
 /obj
