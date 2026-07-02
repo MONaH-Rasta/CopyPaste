@@ -1,5 +1,5 @@
 //If debug is defined it will add a stopwatch to the paste and copydata which can be used to profile copying and pasting.
-// #define CPDEBUG
+// #define DEBUG
 
 using System;
 using System.Collections.Generic;
@@ -18,10 +18,8 @@ using ProtoBuf;
 using UnityEngine;
 using Graphics = System.Drawing.Graphics;
 using WrapMode = System.Drawing.Drawing2D.WrapMode;
-using System.Collections;
 
-
-#if CPDEBUG
+#if DEBUG
 using System.Diagnostics;
 #endif
 
@@ -41,40 +39,9 @@ using System.Diagnostics;
  * 
  */
 
-/*
-Made current with 4.2.7
-Re-added coroutine for `Time, in seconds, to wait between paste batches. Use to tweak performance impact of pasting` (0.075)
-Re-added coroutine for `Time, in seconds, to wait between undo batches. Use to tweak performance impact of undoing` (0.075)
-Include filename in output for paste command and API for users to more easily find problematic copypaste files
-Include filename in output for undo command as a reminder for what file they pasted earlier
-Fixed spoilable items having condition set on creation which resulted in broken stacks and spoiled time remaining (this should be handled solely by dataFloat within ItemModFoodSpoiling)
-Added "saddletest" to default `Prevent These Prefabs From Spawning` list
-Changed default from 15 to 5 for `Amount of entities to paste per batch. Use to tweak performance impact of pasting`
-Changed default from 15 to 5 for `Amount of entities to undo per batch. Use to tweak performance impact of undoing`
-Swallow errors thrown for IO entities in RemoveEntity method for edge case exceptions
-Added exception handling when entities are pasted, allowing the exact prefab to be identified in the output when an error is thrown
-Fixed stability checks being applied to hatches, which caused them to be destroyed on paste
-Added using statement for pooling to the adapter parent list
-Fixed error with "oldID" with duplicates from outdated copypaste files saved in Fortify
-Updated parsing for itemid
-Removed static fields
-Avoid possibility of a concurrency issue when adding water to a water catcher
-
-Needs testing: 
-Fixed elevators, this bug has been around forever!
-- test elevators with /paste only. 
-- if you want to test in RB you will need to remove this line from RaidableBases.cs: TryInvokeMethod(() => BMGELEVATOR.FixElevators(this, out Elevators));
-Fixed batteries not preserving charge or draining after paste
-Fixed external TC being destroyed after paste
-Fixed missing door frames after copying
-Fixed pasted growables preserving properties and sprinkler splashables receiving water
-Added null checks for ballon text and frame text
-Added support for player boats and related entities
-*/
-
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos/nivex", "4.2.7")]
+    [Info("Copy Paste", "misticos", "4.2.8")]
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : CovalencePlugin
     {
@@ -103,6 +70,8 @@ namespace Oxide.Plugins
         private readonly HashSet<ulong> _paidSkinIds = new();
         private readonly Dictionary<string, ItemDefinition> _prefabToItemDef = new();
         private readonly Dictionary<ItemDefinition, string> _itemDefToPrefab = new();
+        private readonly uint _floorFramePrefabId = StringPool.Get("assets/prefabs/building core/floor.frame/floor.frame.prefab");
+        private readonly uint _floorTriangleFramePrefabId = StringPool.Get("assets/prefabs/building core/floor.triangle.frame/floor.triangle.frame.prefab");
         private const float LegacyElevatorLiftMaxHorizontalDistanceSqr = 1f;
         private const float LegacyElevatorLiftVerticalTolerance = 0.5f;
         private const float LegacyElevatorShaftMatchMaxHorizontalDistanceSqr = 1f;
@@ -110,13 +79,8 @@ namespace Oxide.Plugins
         private bool _pasteReady;
         private readonly List<PasteData> _pendingPastes = new();
 
-        public class LastPaste
-        {
-            public string Filename;
-            public List<BaseEntity> Entities = new();
-        }
-
-        private Dictionary<string, Stack<LastPaste>> _lastPastes = new();
+        private Dictionary<string, Stack<List<BaseEntity>>> _lastPastes =
+            new Dictionary<string, Stack<List<BaseEntity>>>();
 
         private Dictionary<string, SignSize> _signSizes = new Dictionary<string, SignSize>
         {
@@ -207,13 +171,8 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName =
                 "Amount of entities to paste per batch. Use to tweak performance impact of pasting")]
-            [DefaultValue(5)]
-            public int PasteBatchSize = 5;
-
-            [JsonProperty(PropertyName =
-                 "Time, in seconds, to wait between paste batches. Use to tweak performance impact of pasting"),
-             DefaultValue(0.075)]
-            public float PasteBatchWait = 0.075f;
+            [DefaultValue(15)]
+            public int PasteBatchSize = 15;
 
             [JsonProperty(PropertyName =
                 "Amount of entities to copy per batch. Use to tweak performance impact of copying")]
@@ -222,16 +181,11 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName =
                 "Amount of entities to undo per batch. Use to tweak performance impact of undoing")]
-            [DefaultValue(5)]
-            public int UndoBatchSize = 5;
+            [DefaultValue(15)]
+            public int UndoBatchSize = 15;
 
             [JsonProperty(PropertyName =
-                 "Time, in seconds, to wait between undo batches. Use to tweak performance impact of undoing"),
-             DefaultValue(0.075)]
-            public float UndoBatchWait = 0.075f;
-
-            [JsonProperty(PropertyName =
-                 "Prevent These Prefabs From Spawning", ObjectCreationHandling = ObjectCreationHandling.Replace),
+                "Prevent These Prefabs From Spawning", ObjectCreationHandling = ObjectCreationHandling.Replace),
             DefaultValue(typeof(List<string>), "")]
             public List<string> BlockedPrefabs = new();
 
@@ -314,11 +268,6 @@ namespace Oxide.Plugins
             _config.BlockedPrefabs ??= new();
             _config.Paste.SpecifiedSkins ??= new();
 
-            foreach (var prefab in _config.BlockedPrefabs)
-            {
-                if (!_blockedPrefabs.Contains(prefab)) _blockedPrefabs.Add(prefab);
-            }
-
             if (!IsValidSkinsMode(_config.Paste.SkinsMode))
             {
                 PrintWarning("Invalid config value specified for 'Skins', resetting to default of 1 (all skins)");
@@ -384,12 +333,6 @@ namespace Oxide.Plugins
             }
         }
 
-        private List<string> _blockedPrefabs = new()
-        {
-            "saddletest",
-            "collectableegg"
-        };
-
         private void OnServerInitialized()
         {
             LoadVariables();
@@ -450,10 +393,7 @@ namespace Oxide.Plugins
             for (int i = 0; i < _pendingPastes.Count; i++)
             {
                 var pasteData = _pendingPastes[i];
-                timer.Once(i * 0.1f, () =>
-                {
-                    pasteData.RunningCoroutine = ServerMgr.Instance.StartCoroutine(PasteLoop(pasteData));
-                });
+                timer.Once(i * 0.1f, () => PasteLoop(pasteData));
             }
             _pendingPastes.Clear();
         }
@@ -655,7 +595,7 @@ namespace Oxide.Plugins
             var io = entity as IOEntity;
             if (io != null)
             {
-                try { io.ClearConnections(); } catch { } // this can throw
+                io.ClearConnections();
             }
 
             var autoTurret = entity as AutoTurret;
@@ -667,7 +607,7 @@ namespace Oxide.Plugins
             entity.Kill();
         }
 
-        private IEnumerator UndoLoop(HashSet<BaseEntity> entities, IPlayer player, string filename)
+        private void UndoLoop(HashSet<BaseEntity> entities, IPlayer player, int count = 0)
         {
             for (var i = entities.Count - 1; i >= 0; i--)
             {
@@ -679,17 +619,28 @@ namespace Oxide.Plugins
                 }
             }
 
-            int entityIndex = 0;
-            foreach (var p in entities)
+            // Take an amount of entities from the entity list (defined in config) and kill them. Will be repeated for every tick until there are no entities left.
+            entities
+                .Take(_config.UndoBatchSize)
+                .ToList()
+                .ForEach(p =>
+                {
+                    entities.Remove(p);
+                    RemoveEntity(p);
+                });
+
+            // If it gets stuck in infinite loop break the loop.
+            if (count != 0 && entities.Count != 0 && entities.Count == count)
             {
-                RemoveEntity(p);
-                if (++entityIndex % _config.UndoBatchSize == 0)
-                    yield return CoroutineEx.waitForSeconds(_config.UndoBatchWait);
+                player?.Reply("Undo cancelled because of infinite loop.");
+                return;
             }
 
-            if (player != null)
+            if (entities.Count > 0)
+                NextTick(() => UndoLoop(entities, player, entities.Count));
+            else if (player != null)
             {
-                player.Reply(Lang("UNDO_SUCCESS", player.Id) + ": " + filename);
+                player.Reply(Lang("UNDO_SUCCESS", player.Id));
 
                 if (_lastPastes.ContainsKey(player.Id) && _lastPastes[player.Id].Count == 0)
                     _lastPastes.Remove(player.Id);
@@ -752,11 +703,11 @@ namespace Oxide.Plugins
                         // Skip entities that are already in the list
                         if (!entity.IsValid() || entity.HasParent())
                             continue;
-
+                        
                         // Skip metal detector flags
                         if (entity.GetComponent<MetalDetectorSource>() != null)
                             continue;
-
+                        
                         if (!houseList.Add(entity))
                             continue;
 
@@ -784,7 +735,7 @@ namespace Oxide.Plugins
 
                         if (entity.GetComponent<BaseLock>() != null)
                             continue;
-
+                        
                         copyData.RawData.Add(EntityData(entity, transform.position,
                             transform.rotation.eulerAngles / Mathf.Rad2Deg, copyData));
                     }
@@ -942,7 +893,7 @@ namespace Oxide.Plugins
                     children.Add(EntityData(child, child.transform.position, child.transform.rotation.eulerAngles, copyData));
                 }
 
-                if (children.Count > 0)
+                if( children.Count > 0 )
                     data.Add("children", children);
             }
 
@@ -951,9 +902,7 @@ namespace Oxide.Plugins
             {
                 var genes = GrowableGeneEncoding.EncodeGenesToInt(growableEntity.Genes);
                 if (genes > 0)
-                {
                     data.Add("genes", genes);
-                }
 
                 var previousGenes = GrowableGeneEncoding.EncodePreviousGenesToInt(growableEntity.Genes);
                 if (previousGenes > 0)
@@ -991,14 +940,14 @@ namespace Oxide.Plugins
                         data.Add("guestPlayers", codeLock.guestPlayers);
                 }
             }
-
+            
             var keyLock = entity.GetComponent<KeyLock>();
             if (keyLock != null)
             {
                 data.Add("code", keyLock.keyCode.ToString());
                 data.Add("firstKeyCreated", keyLock.firstKeyCreated);
             }
-
+            
             var buildingblock = entity as BuildingBlock;
 
             if (buildingblock != null)
@@ -1511,7 +1460,7 @@ namespace Oxide.Plugins
 
             return data;
         }
-
+        
         private List<object> GetLineAnchors(IOEntity.LineAnchor[] lineAnchors, IOEntity ioEntity)
         {
             var anchors = new List<object>();
@@ -1698,14 +1647,14 @@ namespace Oxide.Plugins
 
             var eulerRotation = new Vector3(0f, rotationCorrection * Mathf.Rad2Deg, 0f);
             var quaternionRotation = Quaternion.Euler(eulerRotation);
-
+            
             // Parse VersionNumber
             var version = protocol.ContainsKey("version") ? protocol["version"] as Dictionary<string, object> : null;
-
+            
             VersionNumber vNumber = default;
             if (version != null)
                 vNumber = new VersionNumber((int)version["Major"], (int)version["Minor"], (int)version["Patch"]);
-
+            
             var pasteData = new PasteData
             {
                 HeightAdj = heightAdj,
@@ -1736,104 +1685,102 @@ namespace Oxide.Plugins
                 _pendingPastes.Add(pasteData);
             }
             else
-                NextTick(() => pasteData.RunningCoroutine = ServerMgr.Instance.StartCoroutine(PasteLoop(pasteData)));
+                NextTick(() => PasteLoop(pasteData));
 
             return pasteData;
         }
 
-        private IEnumerator PasteLoop(PasteData pasteData)
+        private void PasteLoop(PasteData pasteData)
         {
             if (pasteData.Cancelled)
             {
-                ServerMgr.Instance.StopCoroutine(pasteData.RunningCoroutine);
-
-                ServerMgr.Instance.StartCoroutine(UndoLoop(new(pasteData.PastedEntities), pasteData.Player, pasteData.Filename));
-
-                yield break;
+                UndoLoop(new HashSet<BaseEntity>(pasteData.PastedEntities), pasteData.Player,
+                    pasteData.PastedEntities.Count);
+                
+                return;
             }
 
-            int entityIndex = 0;
-            using var entities = Pool.Get<PooledList<Dictionary<string, object>>>();
-            entities.AddRange(pasteData.Entities);
-            foreach (var data in entities)
-            {
-                pasteData.Entities.Remove(data);
+            var entities = pasteData.Entities;
+            var todo = entities.Take(_config.PasteBatchSize).ToArray();
 
-                try
+            foreach (var data in todo)
+            {
+                entities.Remove(data);
+
+                PasteEntity(data, pasteData);
+            }
+
+            if (entities.Count > 0)
+                NextTick(() => PasteLoop(pasteData));
+            else
+            {
+
+                // Adjust IOEntity positions to fix alignment issues for older file versions
+                if (pasteData.Version < new VersionNumber(4, 2, 0))
+                    pasteData.checkPosition = Pool.Get<List<IOEntity>>();
+
+                foreach (var ioData in pasteData.EntityLookup.Values.ToArray())
+                    ProgressIOEntity(ioData, pasteData);
+
+                if (pasteData.checkPosition != null)
                 {
-                    PasteEntity(data, pasteData);
+                    AdjustIOEntityPositions(pasteData);
+                    Pool.FreeUnmanaged(ref pasteData.checkPosition);
                 }
-                catch (Exception ex)
+
+                foreach (var keyPair in pasteData.ItemsWithSubEntity)
                 {
-                    Puts("{0}: {1} - {2}", pasteData.Filename, (string)data["prefabname"], ex.ToString());
+                    SetItemSubEntity(pasteData, keyPair.Value, keyPair.Key);
                 }
 
-                if (++entityIndex % _config.PasteBatchSize == 0)
-                    yield return CoroutineEx.waitForSeconds(_config.PasteBatchWait);
-            }
+                if (pasteData.Version <= new VersionNumber(4, 2, 7))
+                    SnapLegacyFloorFrameEntities(pasteData);
 
-            // Adjust IOEntity positions to fix alignment issues for older file versions
-            if (pasteData.Version < new VersionNumber(4, 2, 0))
-                pasteData.checkPosition = Pool.Get<List<IOEntity>>();
-
-            foreach (var ioData in pasteData.EntityLookup.Values.ToArray())
-                ProgressIOEntity(ioData, pasteData);
-
-            if (pasteData.checkPosition != null)
-            {
-                AdjustIOEntityPositions(pasteData);
-                Pool.FreeUnmanaged(ref pasteData.checkPosition);
-            }
-
-            foreach (var keyPair in pasteData.ItemsWithSubEntity)
-            {
-                SetItemSubEntity(pasteData, keyPair.Value, keyPair.Key);
-            }
-
-            foreach (var entity in pasteData.StabilityEntities)
-            {
-                if (entity.ShortPrefabName.Contains("hatch")) // will break hatch
-                    continue;
-                entity.grounded = false;
-                entity.InitializeSupports();
-                entity.UpdateStability();
-            }
-
-            foreach (var adapter in pasteData.industrialStorageAdaptors)
-            {
-                if (adapter == null || adapter.IsDestroyed) { continue; } // checking both is good too
-                if (!adapter.HasParent())
+                foreach (var entity in pasteData.StabilityEntities)
                 {
-                    using var ents = Facepunch.Pool.Get<PooledList<BaseEntity>>(); // prevent pool leak on SetParent exception, caused by other plugins
-                    Vis.Entities(adapter.transform.position + (adapter.transform.up * -0.2f), 0.01f, ents);
-                    if (ents.Count > 0)
+                    entity.grounded = false;
+                    entity.InitializeSupports();
+                    entity.UpdateStability();
+                }
+
+                foreach (var adapter in pasteData.industrialStorageAdaptors)
+                {
+                    if (adapter == null) { continue; }
+                    if (!adapter.HasParent())
                     {
-                        adapter.SetParent(ents[0], true, true);
+                        List<BaseEntity> ents = Facepunch.Pool.Get<List<BaseEntity>>();
+                        Vis.Entities(adapter.transform.position + (adapter.transform.up * -0.2f), 0.01f, ents);
+                        if (ents.Count > 0)
+                        {
+                            adapter.SetParent(ents[0], true, true);
+                        }
+                        Facepunch.Pool.FreeUnmanaged(ref ents);
                     }
+                    adapter.MarkDirtyForceUpdateOutputs();
+                    adapter.SendNetworkUpdateImmediate();
+                    adapter.RefreshIndustrialPreventBuilding();
+                    adapter.NotifyIndustrialNetworkChanged();
                 }
-                adapter.MarkDirtyForceUpdateOutputs();
-                adapter.SendNetworkUpdateImmediate();
-                adapter.RefreshIndustrialPreventBuilding();
-                adapter.NotifyIndustrialNetworkChanged();
-            }
 
-            pasteData.FinalProcessingActions.ForEach(action => action());
+                pasteData.FinalProcessingActions.ForEach(action => action());
 
-            TrySplitPastedBuilding(pasteData);
+                TrySplitPastedBuilding(pasteData);
+                PasteDelayedCupboards(pasteData);
 
-            pasteData.Player.Reply(Lang("PASTE_SUCCESS", pasteData.Player.Id) + ": " + pasteData.Filename);
-#if CPDEBUG
-            pasteData.Player.Reply($"Stopwatch took: {pasteData.Sw.Elapsed.TotalMilliseconds} ms");
+                pasteData.Player.Reply(Lang("PASTE_SUCCESS", pasteData.Player.Id));
+#if DEBUG
+                pasteData.Player.Reply($"Stopwatch took: {pasteData.Sw.Elapsed.TotalMilliseconds} ms");
 #endif
 
-            if (!_lastPastes.TryGetValue(pasteData.Player.Id, out var checkFrom))
-                _lastPastes[pasteData.Player.Id] = checkFrom = new();
+                if (!_lastPastes.ContainsKey(pasteData.Player.Id))
+                    _lastPastes[pasteData.Player.Id] = new Stack<List<BaseEntity>>();
 
-            checkFrom.Push(new() { Entities = pasteData.PastedEntities, Filename = pasteData.Filename });
+                _lastPastes[pasteData.Player.Id].Push(pasteData.PastedEntities);
 
-            pasteData.CallbackFinished?.Invoke();
+                pasteData.CallbackFinished?.Invoke();
 
-            Interface.CallHook("OnPasteFinished", pasteData.PastedEntities, pasteData.Filename, pasteData.Player, pasteData.StartPos);
+                Interface.CallHook("OnPasteFinished", pasteData.PastedEntities, pasteData.Filename, pasteData.Player, pasteData.StartPos);
+            }
         }
 
         private void TrySplitPastedBuilding(PasteData pasteData)
@@ -1846,13 +1793,34 @@ namespace Oxide.Plugins
                 BuildingManager.server.CheckSplit(building.decayEntities[0]);
         }
 
+        private void PasteDelayedCupboards(PasteData pasteData)
+        {
+            var delayedCupboardsData = pasteData.DelayedCupboardsData;
+            if (delayedCupboardsData == null)
+                return;
+
+            pasteData.DelayedCupboardsData = null;
+            pasteData.ReplayingDelayedCupboards = true;
+            try
+            {
+                for (var i = 0; i < delayedCupboardsData.Count; i++)
+                {
+                    PasteEntity(delayedCupboardsData[i], pasteData);
+                }
+            }
+            finally
+            {
+                pasteData.ReplayingDelayedCupboards = false;
+            }
+        }
+
         private void FindAndAssignTargetDoor(DoorManipulator doorManipulator)
         {
             if (!doorManipulator.IsValid() || doorManipulator.IsDestroyed)
                 return;
 
             Transform manipulatorTransform = doorManipulator.transform;
-            using var doors = Pool.Get<PooledList<Door>>(); // unlikely an exception will be thrown here, but the solution is simple and elegant
+            List<Door> doors = Pool.Get<List<Door>>();
             Vis.Entities(manipulatorTransform.position, 1f, doors, 2097152, QueryTriggerInteraction.Ignore);
             Door foundDoor = null;
             float closestDistance = float.PositiveInfinity;
@@ -1868,12 +1836,114 @@ namespace Oxide.Plugins
                     }
                 }
             }
+            Pool.FreeUnmanaged(ref doors);
 
             if (foundDoor.IsValid())
             {
                 doorManipulator.SetParent(foundDoor, true);
                 doorManipulator.SetTargetDoor(foundDoor);
             }
+        }
+
+        private void SnapLegacyFloorFrameEntities(PasteData pasteData)
+        {
+            // Legacy saves can place floor-frame deployables 0.1m low; link only the expected frame sockets instead of refreshing all nearby entity links.
+            List<BaseEntity> floorFrameTargets = null;
+
+            for (int i = 0; i < pasteData.PastedEntities.Count; i++)
+            {
+                StabilityEntity entity = pasteData.PastedEntities[i] as StabilityEntity;
+                if (!entity.IsValid() || entity.IsDestroyed || entity is BuildingBlock)
+                    continue;
+
+                List<EntityLink> links = entity.links;
+                if (links == null || links.Count == 0)
+                    continue;
+
+                for (int j = 0; j < links.Count; j++)
+                {
+                    EntityLink link = links[j];
+                    ConstructionSocket socket = link.socket as ConstructionSocket;
+                    if (socket == null || !socket.male || link.connections.Count != 0 || !IsFloorFrameSocket(socket))
+                        continue;
+
+                    if (floorFrameTargets == null)
+                    {
+                        floorFrameTargets = Pool.Get<List<BaseEntity>>();
+                        for (int k = 0; k < pasteData.PastedEntities.Count; k++)
+                        {
+                            BaseEntity target = pasteData.PastedEntities[k];
+                            if (!target.IsValid() || target.IsDestroyed || target is not BuildingBlock)
+                                continue;
+
+                            uint prefabID = target.prefabID;
+                            if (prefabID == _floorFramePrefabId || prefabID == _floorTriangleFramePrefabId)
+                                floorFrameTargets.Add(target);
+                        }
+                    }
+
+                    SnapLegacyFloorFrameEntity(floorFrameTargets, entity, link);
+                    break;
+                }
+            }
+
+            if (floorFrameTargets != null)
+                Pool.FreeUnmanaged(ref floorFrameTargets);
+        }
+
+        private void SnapLegacyFloorFrameEntity(List<BaseEntity> floorFrameTargets, BaseEntity entity, EntityLink maleLink)
+        {
+            const float targetRadiusSqr = 0.5f * 0.5f;
+
+            Transform transform = entity.transform;
+            Vector3 offset = new Vector3(0f, 0.1f, 0f);
+            transform.position += offset;
+            Vector3 malePosition = transform.position + transform.rotation * maleLink.socket.worldPosition;
+
+            for (int i = 0; i < floorFrameTargets.Count; i++)
+            {
+                BaseEntity target = floorFrameTargets[i];
+
+                if (!target.IsValid() || target.IsDestroyed || target == entity)
+                    continue;
+
+                Transform targetTransform = target.transform;
+                if ((targetTransform.position - malePosition).sqrMagnitude > targetRadiusSqr)
+                    continue;
+
+                List<EntityLink> targetLinks = target.links;
+                if (targetLinks == null || targetLinks.Count == 0)
+                    continue;
+
+                bool connected = false;
+                for (int j = 0; j < targetLinks.Count; j++)
+                {
+                    EntityLink targetLink = targetLinks[j];
+
+                    ConstructionSocket targetSocket = targetLink.socket as ConstructionSocket;
+                    if (targetSocket == null || !targetSocket.female || !IsFloorFrameSocket(targetSocket) || !maleLink.CanConnect(targetLink))
+                        continue;
+
+                    if (!maleLink.Contains(targetLink))
+                        maleLink.Add(targetLink);
+
+                    if (!targetLink.Contains(maleLink))
+                        targetLink.Add(maleLink);
+
+                    connected = true;
+                }
+
+                if (connected)
+                    return;
+            }
+
+            transform.position -= offset;
+        }
+
+        private bool IsFloorFrameSocket(ConstructionSocket socket)
+        {
+            return socket.socketType == ConstructionSocket.Type.FloorFrame ||
+                   socket.socketType == ConstructionSocket.Type.FloorFrameTriangle;
         }
 
         private void AdjustIOEntityPositions(PasteData pasteData)
@@ -2175,10 +2245,10 @@ namespace Oxide.Plugins
             bool isChild = parent != null;
 
             var prefabname = GetPrefabName((string)data["prefabname"]);
-#if CPDEBUG
+#if DEBUG
             Puts($"{nameof(PasteLoop)}: Entity {prefabname}");
 #endif
-
+            
             var skinid = data.ContainsKey("skinid")
                 ? FilterSkinId(pasteData, ulong.Parse(data["skinid"].ToString()))
                 : 0;
@@ -2208,15 +2278,22 @@ namespace Oxide.Plugins
                 }
             }
 
+            if (!isChild && !pasteData.ReplayingDelayedCupboards && prefabname.Contains("cupboard.tool") && ++pasteData.CupboardCount >= 2)
+            {
+                pasteData.DelayedCupboardsData ??= new();
+                pasteData.DelayedCupboardsData.Add(data);
+                return;
+            }
+
             var pos = isChild ? Vector3.zero : (Vector3)data["position"];
             var rot = isChild ? Quaternion.identity : (Quaternion)data["rotation"];
             var localPos = isChild ? (Vector3)data["position"] : Vector3.zero;
             var localRot = isChild ? (Quaternion)data["rotation"] : Quaternion.identity;
-
+                
             var ownerId = pasteData.BasePlayer?.userID ?? 0;
             if (data.ContainsKey("ownerid"))
             {
-#if CPDEBUG
+#if DEBUG
                 Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1077");
 #endif
                 ownerId = Convert.ToUInt64(data["ownerid"]);
@@ -2232,7 +2309,7 @@ namespace Oxide.Plugins
             if (prefabname.Contains("locks") && pasteData.Version < new VersionNumber(4, 2, 0))
                 return;
 
-            if (_blockedPrefabs.Exists(prefabname.Contains))
+            if (_config.BlockedPrefabs.Exists(prefabname.Contains))
                 return;
 
             BaseEntity entity = null;
@@ -2262,9 +2339,9 @@ namespace Oxide.Plugins
 
             if (entity == null)
                 return;
-
+            
             var transform = entity.transform;
-
+            
             // If the entity is a child, set the parent and the local position and rotation.
             if (isChild)
             {
@@ -2272,9 +2349,9 @@ namespace Oxide.Plugins
                 {
                     var playerBoat = parent as PlayerBoat;
                     bool needsNormalParenting = entity is DroppedItem;
-                    bool playerBoatEntity = playerBoat != null && !needsNormalParenting;
+                    bool playerBotEntity = playerBoat != null && !needsNormalParenting;
 
-                    if (playerBoatEntity)
+                    if (playerBotEntity)
                     {
                         if (!pasteData.playerBoats.ContainsKey(playerBoat))
                             pasteData.playerBoats[playerBoat] = new();
@@ -2294,8 +2371,8 @@ namespace Oxide.Plugins
                     else
                     {
                         entity.gameObject.Identity();
-                        if (data.TryGetValue("parentbone", out var bone))
-                            entity.SetParent(parent, bone.ToString());
+                        if (data.ContainsKey("parentbone"))
+                            entity.SetParent(parent, data["parentbone"].ToString());
                         else
                             entity.SetParent(parent);
                     }
@@ -2309,7 +2386,7 @@ namespace Oxide.Plugins
                     {
                         photo.AddToEasel(parent);
                     }
-                    else if (!playerBoatEntity && entity is not (CustomDoorManipulator or AutoTurret or GrowableEntity or Signage or BoatBuildingBlock))
+                    else if (!playerBotEntity && ShouldInvokeOnDeployed(entity))
                     {
                         entity.OnDeployed(parent, null, _emptyItem);
                     }
@@ -2365,12 +2442,11 @@ namespace Oxide.Plugins
                 if (pasteData.BuildingId == 0)
                     pasteData.BuildingId = BuildingManager.server.NewBuildingID();
 
-                if (decayEntity is BuildingPrivlidge && ++pasteData.CupboardCount >= 2)
+                if (pasteData.ReplayingDelayedCupboards && decayEntity is BuildingPrivlidge)
                 {
-                    // Hide additional TCs from decay cycle during paste to prevent EnsurePrimary()
-                    // killing them before TrySplitPastedBuilding can separate buildings
-                    BuildingManager.server.Remove(decayEntity);
-                    pasteData.FinalProcessingActions.Add(() => decayEntity.AttachToBuilding(pasteData.BuildingId));
+                    var nearbyBuildingBlock = decayEntity.GetNearbyBuildingBlock();
+                    var building = nearbyBuildingBlock?.GetBuilding();
+                    decayEntity.buildingID = building?.ID ?? pasteData.BuildingId;
                 }
                 else
                 {
@@ -2497,17 +2573,17 @@ namespace Oxide.Plugins
             // This needs to stay for the old configs to load properly but is unused because of the new 'children' system.
             pasteData.PastedEntities.AddRange(TryPasteSlots(entity, data, pasteData));
 
-            if (isChild && data.ContainsKey("slot"))
+            if (isChild && data.ContainsKey( "slot" ))
             {
-                var slot = (BaseEntity.Slot)Convert.ToInt32(data["slot"]);
-                if (parent.HasSlot(slot))
+                var slot = (BaseEntity.Slot) Convert.ToInt32(data["slot"]);
+                if (parent.HasSlot( slot ))
                 {
-                    parent.SetSlot(slot, entity);
+                    parent.SetSlot( slot, entity );
                 }
             }
-
+            
             TryPasteLocks(entity, data, pasteData);
-
+            
             var autoTurret = entity as AutoTurret;
             if (autoTurret != null)
             {
@@ -2515,7 +2591,7 @@ namespace Oxide.Plugins
 
                 if (data.ContainsKey("autoturret"))
                 {
-#if CPDEBUG
+#if DEBUG
                     Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1305");
 #endif
                     var autoTurretData = data["autoturret"] as Dictionary<string, object>;
@@ -2851,7 +2927,7 @@ namespace Oxide.Plugins
 
                 if (data.ContainsKey("cupboard"))
                 {
-#if CPDEBUG
+#if DEBUG
                     Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1521");
 #endif
                     var cupboardData = data["cupboard"] as Dictionary<string, object>;
@@ -3254,7 +3330,7 @@ namespace Oxide.Plugins
                     growableEntity.Fertilized = Convert.ToBoolean(rawFertilized);
 
                 if (data.TryGetValue("state", out var rawState))
-                    growableEntity.ChangeState((PlantProperties.State)Convert.ToSingle(rawState), false, true);
+                    growableEntity.ChangeState((PlantProperties.State) Convert.ToSingle(rawState), false, true);
             }
 
             var ioEntity = entity as IOEntity;
@@ -3273,15 +3349,14 @@ namespace Oxide.Plugins
                 object oldIdObject;
                 if (ioData.TryGetValue("oldID", out oldIdObject))
                 {
-#if CPDEBUG
+#if DEBUG
                     Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1619");
 #endif
                     var oldId = Convert.ToUInt64(oldIdObject);
-                    if (!pasteData.EntityLookup.ContainsKey(oldId)) // duplicate ID from outdated copy
-                        pasteData.EntityLookup.Add(oldId, ioData);
+                    pasteData.EntityLookup.Add(oldId, ioData);
                 }
             }
-
+            
             var flagsData = new Dictionary<string, object>();
 
             if (data.ContainsKey("flags"))
@@ -3302,7 +3377,7 @@ namespace Oxide.Plugins
                 foreach (var flag in flags)
                     entity.SetFlag(flag.Key, flag.Value);
             }
-
+            
             // If the on flag was saved, toggle it off and enter edit mode so it can be properly triggered on
             if (boatBuildingStation != null && boatBuildingStation.IsOn())
             {
@@ -3329,12 +3404,11 @@ namespace Oxide.Plugins
                                 return;
 
                             if (!boomBox.HasFlag(BoomBox.HasCassette))
-                                boomBox.baseEntity.ClientRPC<string>(RpcTarget.NetworkGroup("OnRadioIPChanged"), boomBox.CurrentRadioIp);
+                                boomBox.baseEntity.ClientRPC(RpcTarget.NetworkGroup("OnRadioIPChanged"), boomBox.CurrentRadioIp);
 
                             boomBox.ServerTogglePlay(true);
 
-                            foreach (var connectedSpeaker in pasteData.ConnectedSpeakers)
-                            {
+                            foreach (var connectedSpeaker in pasteData.ConnectedSpeakers) {
                                 if (connectedSpeaker.IsValid() && !connectedSpeaker.IsDestroyed)
                                 {
                                     connectedSpeaker.SetFlag(BaseEntity.Flags.Reserved8, false);
@@ -3433,7 +3507,7 @@ namespace Oxide.Plugins
                     }
                 }
             }
-
+            
             var photoFrame = entity as PhotoFrame;
             if (photoFrame != null && data.ContainsKey("photoEntity"))
             {
@@ -3491,7 +3565,7 @@ namespace Oxide.Plugins
                 if (data.TryGetValue("sunlight", out var sunlight))
                     farmableAnimal.AnimalSunlight = Convert.ToSingle(sunlight);
                 if (data.TryGetValue("animalName", out var animalName))
-                    farmableAnimal.AnimalName = (string)animalName;
+                    farmableAnimal.AnimalName = (string) animalName;
 
                 if (parent != null && parent is ChickenCoop chickenCoopParent &&
                     chickenCoopParent.ChickenPrefab.resourceID == entity.prefabID)
@@ -3516,7 +3590,7 @@ namespace Oxide.Plugins
                         {
                             chickenCoop.Animals.Add(new ChickenCoop.AnimalStatus()
                             {
-                                TimeUntilHatch = (TimeUntil)Convert.ToSingle(timeUntilHatches[i])
+                                TimeUntilHatch = (TimeUntil) Convert.ToSingle(timeUntilHatches[i])
                             });
                         }
                         if (!chickenCoop.IsInvoking(new Action(chickenCoop.CheckEggHatchState)))
@@ -3528,6 +3602,25 @@ namespace Oxide.Plugins
 
             pasteData.PastedEntities.Add(entity);
             pasteData.CallbackSpawned?.Invoke(entity);
+        }
+
+        private bool ShouldInvokeOnDeployed(BaseEntity entity)
+        {
+            if (entity is CustomDoorManipulator
+                or AutoTurret
+                or GrowableEntity
+                or Signage
+                or BoatBuildingBlock)
+            {
+                return false;
+            }
+
+            if (entity is SimpleBuildingBlock sbb && sbb.variants.IsNullOrEmpty())
+            {
+                return false;
+            }
+
+            return true;
         }
 
         private void ProgressIOEntity(Dictionary<string, object> ioData, PasteData pasteData)
@@ -3579,7 +3672,7 @@ namespace Oxide.Plugins
             if (timerSwitch != null && ioData.ContainsKey("timerLength"))
             {
                 timerSwitch.timerLength = Convert.ToSingle(ioData["timerLength"]);
-                if (timerSwitch.IsOn())
+                if(timerSwitch.IsOn())
                 {
                     timerSwitch.SetFlag(BaseEntity.Flags.On, false);
                     timerSwitch.SwitchPressed();
@@ -3640,11 +3733,11 @@ namespace Oxide.Plugins
             if (audioVisual != null)
             {
                 if (ioData.TryGetValue("colour", out object audioObj))
-                    audioVisual.currentColour = (AudioVisualisationEntity.LightColour)Convert.ToInt32(audioObj);
+                    audioVisual.currentColour = (AudioVisualisationEntity.LightColour) Convert.ToInt32(audioObj);
                 if (ioData.TryGetValue("volumeSensitivity", out audioObj))
-                    audioVisual.currentVolumeSensitivity = (AudioVisualisationEntity.VolumeSensitivity)Convert.ToInt32(audioObj);
+                    audioVisual.currentVolumeSensitivity = (AudioVisualisationEntity.VolumeSensitivity) Convert.ToInt32(audioObj);
                 if (ioData.TryGetValue("speed", out audioObj))
-                    audioVisual.currentSpeed = (AudioVisualisationEntity.Speed)Convert.ToInt32(audioObj);
+                    audioVisual.currentSpeed = (AudioVisualisationEntity.Speed) Convert.ToInt32(audioObj);
                 if (ioData.TryGetValue("gradient", out audioObj))
                     audioVisual.currentGradient = Convert.ToInt32(audioObj);
                 if (ioData.TryGetValue("connectedTo", out audioObj))
@@ -3689,7 +3782,7 @@ namespace Oxide.Plugins
                     if (!input.TryGetValue("connectedID", out oldIdObject))
                         continue;
 
-#if CPDEBUG
+#if DEBUG
                     Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1712");
 #endif
                     var oldId = Convert.ToUInt64(oldIdObject);
@@ -3705,8 +3798,8 @@ namespace Oxide.Plugins
                         var ioConnection = pasteData.EntityLookup[oldId];
                         if (ioConnection.ContainsKey("newId"))
                         {
-#if CPDEBUG
-                            Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1719");
+#if DEBUG
+            Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1719");
 #endif
                             ioEntity.inputs[index].connectedTo.entityRef.uid =
                                 new NetworkableId(Convert.ToUInt64(ioConnection["newId"]));
@@ -3724,7 +3817,7 @@ namespace Oxide.Plugins
                 for (var index = 0; index < outputs.Count; index++)
                 {
                     var output = outputs[index] as Dictionary<string, object>;
-#if CPDEBUG
+#if DEBUG
                     Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1744");
 #endif
                     var oldId = Convert.ToUInt64(output["connectedID"]);
@@ -3736,7 +3829,7 @@ namespace Oxide.Plugins
 
                         var ioConnection = pasteData.EntityLookup[oldId];
 
-                        if (ioConnection.ContainsKey("newId"))
+                        if( ioConnection.ContainsKey( "newId" ) )
                         {
                             var ioOutput = ioEntity.outputs[index];
                             var ioEntity2 = ioConnection["entity"] as IOEntity;
@@ -3744,7 +3837,7 @@ namespace Oxide.Plugins
                             if (!ioEntity2.IsValid() || ioEntity2.IsDestroyed)
                                 continue;
 
-                            var connectedToSlot = Convert.ToInt32(output["connectedToSlot"]);
+                            var connectedToSlot = Convert.ToInt32( output["connectedToSlot"] );
 
                             if (connectedToSlot >= ioEntity2.inputs.Length)
                                 continue;
@@ -3752,42 +3845,42 @@ namespace Oxide.Plugins
                             var ioInput = ioEntity2.inputs[connectedToSlot];
 
                             ioOutput.connectedTo = new IOEntity.IORef();
-                            ioOutput.connectedTo.Set(ioEntity2);
+                            ioOutput.connectedTo.Set( ioEntity2 );
                             ioOutput.connectedToSlot = connectedToSlot;
-                            ioOutput.type = (IOEntity.IOType)Convert.ToInt32(output["type"]);
+                            ioOutput.type = (IOEntity.IOType) Convert.ToInt32( output["type"] );
                             ioOutput.niceName = output["niceName"] as string;
                             ioOutput.connectedTo.Init();
 
                             ioInput.connectedTo = new IOEntity.IORef();
-                            ioInput.connectedTo.Set(ioEntity);
+                            ioInput.connectedTo.Set( ioEntity );
                             ioInput.connectedToSlot = index;
                             ioInput.connectedTo.Init();
 
                             ioOutput.worldSpaceLineEndRotation =
-                                ioEntity2.transform.TransformDirection(ioInput.handleDirection);
+                                ioEntity2.transform.TransformDirection( ioInput.handleDirection );
                             ioOutput.originPosition = ioEntity.transform.position;
                             ioOutput.originRotation = ioEntity.transform.rotation.eulerAngles;
 
-                            if (output.TryGetValue("wireColour", out var wireColour))
+                            if( output.TryGetValue( "wireColour", out var wireColour ) )
                             {
-                                var color = (WireTool.WireColour)Convert.ToInt32(wireColour);
+                                var color = (WireTool.WireColour) Convert.ToInt32( wireColour );
                                 ioInput.wireColour = color;
                                 ioOutput.wireColour = color;
                             }
 
-                            if (output.ContainsKey("linePoints") && output["linePoints"] is List<object> linePoints)
+                            if (output.ContainsKey( "linePoints" ) && output["linePoints"] is List<object> linePoints)
                             {
                                 ioOutput.linePoints = new Vector3[linePoints.Count];
-                                for (var i = 0; i < linePoints.Count; i++)
+                                for( var i = 0; i < linePoints.Count; i++ )
                                 {
                                     var linePoint = linePoints[i] as Dictionary<string, object>;
                                     ioOutput.linePoints[i] = new Vector3(
-                                        Convert.ToSingle(linePoint["x"]),
-                                        Convert.ToSingle(linePoint["y"]),
-                                        Convert.ToSingle(linePoint["z"]));
+                                        Convert.ToSingle( linePoint["x"] ),
+                                        Convert.ToSingle( linePoint["y"] ),
+                                        Convert.ToSingle( linePoint["z"] ) );
                                 }
                             }
-
+                            
                             if (output.ContainsKey("slackLevels") && output["slackLevels"] is List<object> slackLevels)
                             {
                                 ioOutput.slackLevels = new float[slackLevels.Count];
@@ -3823,7 +3916,7 @@ namespace Oxide.Plugins
                                                     Convert.ToSingle(pos["z"])),
                                                 index = Convert.ToInt32(lineAnchor["index"]),
                                                 boneName = lineAnchor["boneName"] as string
-                                            };
+                                            };                                            
                                         }
                                     }
                                 }
@@ -3984,7 +4077,7 @@ namespace Oxide.Plugins
             data.Add("items", itemlist);
         }
 
-        private void PopulateInventory(PasteData pasteData, Dictionary<string, object> data, BaseEntity entity, ItemContainer inventory)
+        private void PopulateInventory(PasteData pasteData, Dictionary<string,object> data, BaseEntity entity, ItemContainer inventory)
         {
             var items = new List<object>();
 
@@ -3996,8 +4089,8 @@ namespace Oxide.Plugins
             foreach (var itemDef in items)
             {
                 var item = itemDef as Dictionary<string, object>;
-                var itemid = item.TryGetValue("id", out getObj) ? Convert.ToInt32(getObj) : 0;
-                var itemskin = item.TryGetValue("skinid", out getObj) ? FilterSkinId(pasteData, Convert.ToUInt64(getObj)) : 0;
+                var itemid = Convert.ToInt32(item["id"]);
+                var itemskin = item.ContainsKey("skinid") ? FilterSkinId(pasteData, ulong.Parse(item["skinid"].ToString())) : 0;
 
                 var def = ItemManager.FindItemDefinition(itemid);
                 if (!pasteData.Dlc && itemid != 0 && _dlcItemIds.Contains(itemid))
@@ -4017,8 +4110,8 @@ namespace Oxide.Plugins
                     }
                 }
 
-                var itemamount = item.TryGetValue("amount", out getObj) ? Convert.ToInt32(getObj) : 0;
-                var dataInt = item.TryGetValue("dataInt", out getObj) ? Convert.ToInt32(getObj) : 0;
+                var itemamount = Convert.ToInt32(item["amount"]);
+                var dataInt = item.ContainsKey("dataInt") ? Convert.ToInt32(item["dataInt"]) : 0;
                 var dataFloat = item.TryGetValue("dataFloat", out getObj) ? Convert.ToSingle(getObj) : 0f;
 
                 if (itemid == 0 || itemamount == 0)
@@ -4027,22 +4120,32 @@ namespace Oxide.Plugins
                 var growableEntity = entity as GrowableEntity;
                 if (growableEntity != null)
                 {
-                    if (data.TryGetValue("genes", out getObj) && getObj is int genesData && genesData > 0)
+                    if (data.ContainsKey("genes"))
                     {
-                        GrowableGeneEncoding.DecodeIntToGenes(genesData, growableEntity.Genes);
+                        var genesData = (int)data["genes"];
+
+                        if (genesData > 0)
+                        {
+                            GrowableGeneEncoding.DecodeIntToGenes(genesData, growableEntity.Genes);
+                        }
                     }
 
-                    if (data.TryGetValue("hasParent", out getObj) && getObj is bool isParented && isParented)
+                    if (data.ContainsKey("hasParent"))
                     {
-                        RaycastHit hitInfo;
+                        var isParented = (bool)data["hasParent"];
 
-                        if (Physics.Raycast(growableEntity.transform.position, Vector3.down, out hitInfo,
-                                .5f, Rust.Layers.DefaultDeployVolumeCheck))
+                        if (isParented)
                         {
-                            var parentEntity = hitInfo.GetEntity();
-                            if (parentEntity != null)
+                            RaycastHit hitInfo;
+
+                            if (Physics.Raycast(growableEntity.transform.position, Vector3.down, out hitInfo,
+                                    .5f, Rust.Layers.DefaultDeployVolumeCheck))
                             {
-                                growableEntity.SetParent(parentEntity, true);
+                                var parentEntity = hitInfo.GetEntity();
+                                if (parentEntity != null)
+                                {
+                                    growableEntity.SetParent(parentEntity, true);
+                                }
                             }
                         }
                     }
@@ -4052,8 +4155,8 @@ namespace Oxide.Plugins
                     itemid = GetItemId(itemid);
 
                 var targetPos = -1;
-                if (item.TryGetValue("position", out getObj))
-                    targetPos = Convert.ToInt32(getObj);
+                if (item.ContainsKey("position"))
+                    targetPos = Convert.ToInt32(item["position"]);
 
                 if (entity is BaseOven ov && ov.visualFood && targetPos >= ov._inputSlotIndex &&
                     targetPos < ov._inputSlotIndex + ov.inputSlots &&
@@ -4064,7 +4167,7 @@ namespace Oxide.Plugins
 
                 if (i != null)
                 {
-                    if (i.hasCondition && i.info != null && !i.info.HasComponent<ItemModFoodSpoiling>()) // ItemModFoodSpoiling handles condition using dataFloat, setting condition here can result in broken stacks and spoiled time remaining
+                    if (i.hasCondition)
                     {
                         if (item.TryGetValue("maxCondition", out getObj))
                         {
@@ -4077,10 +4180,10 @@ namespace Oxide.Plugins
                             i.condition = Convert.ToSingle(getObj);
                     }
 
-                    if (item.TryGetValue("text", out getObj) && getObj is string str1 && !string.IsNullOrEmpty(str1))
+                    if (item.TryGetValue("text", out object obj) && obj is string str1 && !string.IsNullOrEmpty(str1))
                         i.text = str1;
 
-                    if (item.TryGetValue("name", out getObj) && getObj is string str2 && !string.IsNullOrEmpty(str2))
+                    if (item.TryGetValue("name", out obj) && obj is string str2 && !string.IsNullOrEmpty(str2))
                         i.name = str2;
 
                     if (item.TryGetValue("fuel", out getObj))
@@ -4090,9 +4193,9 @@ namespace Oxide.Plugins
                             i.fuel = fuel;
                     }
 
-                    if (item.TryGetValue("blueprintTarget", out getObj))
+                    if (item.ContainsKey("blueprintTarget"))
                     {
-                        var blueprintTarget = Convert.ToInt32(getObj);
+                        var blueprintTarget = Convert.ToInt32(item["blueprintTarget"]);
 
                         if (pasteData.IsItemReplace)
                             blueprintTarget = GetItemId(blueprintTarget);
@@ -4120,36 +4223,36 @@ namespace Oxide.Plugins
                         i.instanceData.dataFloat = dataFloat;
                     }
 
-                    if (item.TryGetValue("IsOn", out getObj))
+                    if (item.ContainsKey("IsOn"))
                     {
-                        i.SetFlag(Item.Flag.IsOn, Convert.ToBoolean(getObj));
+                        i.SetFlag(Item.Flag.IsOn, Convert.ToBoolean(item["IsOn"]));
                     }
 
-                    if (item.TryGetValue("subEntity", out getObj))
+                    if (item.ContainsKey("subEntity"))
                     {
                         // Needs to be processed after all of the children are spawned
-                        var oldId = Convert.ToUInt64(getObj);
-                        if (oldId != 0 && !pasteData.ItemsWithSubEntity.ContainsKey(oldId))
+                        var oldId = Convert.ToUInt64(item["subEntity"]);
+                        if (oldId != 0)
                             pasteData.ItemsWithSubEntity.Add(oldId, i);
                     }
 
-                    if (item.TryGetValue("armorSlotCapacity", out getObj))
+                    if (item.TryGetValue("armorSlotCapacity", out var armorSlotCapacityObj))
                     {
-                        var armorSlotCapacity = Convert.ToInt32(getObj);
+                        var armorSlotCapacity = Convert.ToInt32(armorSlotCapacityObj);
                         if (armorSlotCapacity > 0 && i.info != null && i.info.TryGetComponent<ItemModContainerArmorSlot>(out var armorSlot))
                             armorSlot.CreateAtCapacity(armorSlotCapacity, i);
                     }
                     else if (i.info != null && i.info.isWearable &&
-                             item.TryGetValue("items", out getObj) &&
-                             getObj is List<object> { Count: > 0 } slotItems &&
+                             item.TryGetValue("items", out var rawSlotItems) &&
+                             rawSlotItems is List<object> { Count: > 0 } slotItems &&
                              i.info.TryGetComponent<ItemModContainerArmorSlot>(out var armorSlot))
                     {
                         armorSlot.CreateAtCapacity(slotItems.Count, i);
                     }
 
-                    if (item.TryGetValue("ownershipShares", out getObj))
+                    if (item.TryGetValue("ownershipShares", out var ownershipSharesObj))
                     {
-                        var ownershipShares = getObj as List<object>;
+                        var ownershipShares = ownershipSharesObj as List<object>;
                         if (ownershipShares != null && ownershipShares.Count > 0)
                         {
                             i.InitializeItemOwnership();
@@ -4164,12 +4267,12 @@ namespace Oxide.Plugins
 
                                     var itemOwnershipShare = new ItemOwnershipShare();
 
-                                    if (ownershipShare.TryGetValue("username", out getObj) && getObj is string username)
-                                        itemOwnershipShare.username = username;
-                                    if (ownershipShare.TryGetValue("reason", out getObj) && getObj is string reason)
-                                        itemOwnershipShare.reason = reason;
-                                    if (ownershipShare.TryGetValue("amount", out getObj))
-                                        itemOwnershipShare.amount = Convert.ToInt32(getObj);
+                                    if (ownershipShare.TryGetValue("username", out var username))
+                                        itemOwnershipShare.username = (string) username;
+                                    if (ownershipShare.TryGetValue("reason", out var reason))
+                                        itemOwnershipShare.reason = (string) reason;
+                                    if (ownershipShare.TryGetValue("amount", out var amount))
+                                        itemOwnershipShare.amount = Convert.ToInt32(amount);
 
                                     if (itemOwnershipShare.IsValid())
                                         i.ownershipShares.Add(itemOwnershipShare);
@@ -4187,13 +4290,13 @@ namespace Oxide.Plugins
 
                     if (heldent != null)
                     {
-                        if (item.TryGetValue("magazine", out getObj))
+                        if (item.ContainsKey("magazine"))
                         {
                             var projectiles = heldent.GetComponent<BaseProjectile>();
 
                             if (projectiles != null)
                             {
-                                var magazine = getObj as Dictionary<string, object>;
+                                var magazine = item["magazine"] as Dictionary<string, object>;
                                 var ammotype = int.Parse(magazine.Keys.ToArray()[0]);
                                 var ammoamount = int.Parse(magazine[ammotype.ToString()].ToString());
 
@@ -4205,11 +4308,11 @@ namespace Oxide.Plugins
                             }
                         }
 
-                        if (item.TryGetValue("children", out getObj))
+                        if (item.ContainsKey("children"))
                         {
                             PreLoadChildrenData(item);
 
-                            var children = getObj as List<object>;
+                            var children = item["children"] as List<object>;
                             if (children != null)
                             {
                                 foreach (var child in children)
@@ -4223,9 +4326,9 @@ namespace Oxide.Plugins
                             }
                         }
 
-                        if (item.TryGetValue("boomBox", out getObj) &&
-                            getObj is Dictionary<string, object> boomBoxData && boomBoxData != null &&
-                            heldent is HeldBoomBox heldBoomBox && heldBoomBox != null)
+                        if (item.TryGetValue("boomBox", out var boomBoxObj) &&
+                            boomBoxObj is Dictionary<string, object> boomBoxData && boomBoxData != null &&
+                            heldent is HeldBoomBox heldBoomBox)
                         {
                             PopulateBoomBox(boomBoxData, heldBoomBox.BoxController);
                         }
@@ -4235,7 +4338,7 @@ namespace Oxide.Plugins
                     if (heldEntity != null && heldEntity is Detonator detonator)
                     {
                         detonator.frequency = dataInt;
-                        if (detonator.IsOn())
+                        if ( detonator.IsOn() )
                             RFManager.AddBroadcaster(detonator.frequency, detonator);
                     }
 
@@ -4243,11 +4346,9 @@ namespace Oxide.Plugins
 
                     if (entity is WaterCatcher waterCatcher)
                     {
-                        var info = i.info; // avoid possibility of a concurrency issue
-                        var amt = i.amount;
                         waterCatcher.Invoke(() => {
                             if (waterCatcher != null && !waterCatcher.IsDestroyed)
-                                waterCatcher.inventory.AddItem(info, amt);
+                                waterCatcher.inventory.AddItem(i.info, i.amount);
                         }, 1f);
                     }
                     else
@@ -4353,7 +4454,7 @@ namespace Oxide.Plugins
             }
         }
 
-        void PopulateHeadData(Dictionary<string, object> data, HeadData headData)
+        void PopulateHeadData(Dictionary<string,object> data, HeadData headData)
         {
             if (data.ContainsKey("currentTrophyData"))
             {
@@ -4454,7 +4555,7 @@ namespace Oxide.Plugins
             var copyMechanics = CopyMechanics.Proximity;
             var radius = _config.Copy.Radius;
 
-            for (var i = 0; ; i += 2)
+            for (var i = 0;; i += 2)
             {
                 if (i >= args.Length)
                     break;
@@ -4527,21 +4628,21 @@ namespace Oxide.Plugins
         private bool GetSlot(BaseEntity parent, BaseEntity child, out BaseEntity.Slot? slot)
         {
             slot = null;
-
+            
             for (int s = 0; s < (int)BaseEntity.Slot.Count; s++)
             {
                 var slotEnum = (BaseEntity.Slot)s;
-
-                if (parent.HasSlot(slotEnum) && parent.GetSlot(slotEnum) == child)
+                
+                if (parent.HasSlot( slotEnum ) && parent.GetSlot( slotEnum ) == child)
                 {
                     slot = slotEnum;
                     return true;
                 }
             }
-
+            
             return false;
         }
-
+        
         // private void TryCopySlots(BaseEntity ent, IDictionary<string, object> housedata, bool saveShare)
         // {
         //     foreach (var slot in _checkSlots)
@@ -4636,7 +4737,7 @@ namespace Oxide.Plugins
                 dlc = _config.Paste.Dlc,
                 checkPlaced = true, enableSaving = true;
 
-            for (var i = 0; ; i += 2)
+            for (var i = 0;; i += 2)
             {
                 if (i >= args.Length)
                     break;
@@ -4813,7 +4914,7 @@ namespace Oxide.Plugins
                     {
                         foreach (var userId in (List<object>)data["whitelistPlayers"])
                         {
-#if CPDEBUG
+#if DEBUG
                             Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 2206");
 #endif
                             codeLock.whitelistPlayers.Add(Convert.ToUInt64(userId));
@@ -4831,7 +4932,7 @@ namespace Oxide.Plugins
                         {
                             foreach (var userId in (List<object>)data["guestPlayers"])
                             {
-#if CPDEBUG
+#if DEBUG
                                 Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 2224");
 #endif
                                 codeLock.guestPlayers.Add(Convert.ToUInt64(userId));
@@ -4864,14 +4965,14 @@ namespace Oxide.Plugins
 
                 if (pasteData.Ownership && data.ContainsKey("ownerId"))
                 {
-#if CPDEBUG
+#if DEBUG
                     Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 2249");
 #endif
                     keyLock.OwnerID = Convert.ToUInt64(data["ownerId"]);
                 }
             }
         }
-
+        
         private List<BaseEntity> TryPasteSlots(BaseEntity ent, Dictionary<string, object> structure,
             PasteData pasteData)
         {
@@ -4951,7 +5052,7 @@ namespace Oxide.Plugins
         {
             if (filterItems?.Count > 0)
             {
-                foreach (var item in filterItems) { itemstring += (item.TargetItem ? item.TargetItem.itemid : "-1") + "/" + item.MaxAmountInOutput + "/" + item.BufferAmount + "/" + item.MinAmountInInput + "/" + (item.TargetCategory.HasValue ? (int)item.TargetCategory.Value : "-1") + "/" + item.IsBlueprint + "\\"; }
+                foreach (var item in filterItems) { itemstring += (item.TargetItem ? item.TargetItem.itemid : "-1") + "/" + item.MaxAmountInOutput + "/" + item.BufferAmount + "/" + item.MinAmountInInput + "/" + (item.TargetCategory.HasValue ? (int) item.TargetCategory.Value : "-1") + "/" + item.IsBlueprint + "\\"; }
                 return Convert.ToBase64String(Facepunch.Utility.Compression.Compress(Encoding.ASCII.GetBytes(itemstring)));
             }
             return itemstring;
@@ -5053,7 +5154,7 @@ namespace Oxide.Plugins
 
             return false;
         }
-
+        
         [Command("copy")]
         private void CmdCopy(IPlayer player, string command, string[] args)
         {
@@ -5156,18 +5257,18 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (!_lastPastes.TryGetValue(player.Id, out var checkFrom))
+            if (!_lastPastes.ContainsKey(player.Id))
             {
                 player.Reply(Lang("NO_PASTED_STRUCTURE", player.Id));
                 return;
             }
 
-            LastPaste lastPaste = checkFrom.Pop();
+            var entities = new HashSet<BaseEntity>(_lastPastes[player.Id].Pop().ToList());
 
-            ServerMgr.Instance.StartCoroutine(UndoLoop(new(lastPaste.Entities), player, lastPaste.Filename));
+            UndoLoop(entities, player);
         }
 
-        private readonly Dictionary<string, string> ReplacePrefab = new Dictionary<string, string>
+        private static readonly Dictionary<string, string> ReplacePrefab = new Dictionary<string, string>
         {
             { "assets/rust.ai/nextai/testridablehorse.prefab", "assets/content/vehicles/horse/ridablehorse.prefab" },
             { "assets/content/vehicles/horse/ridablehorse2.prefab", "assets/content/vehicles/horse/ridablehorse.prefab" },
@@ -5176,7 +5277,7 @@ namespace Oxide.Plugins
 
         //Replace between old ItemID to new ItemID
 
-        private readonly Dictionary<int, int> ReplaceItemId = new Dictionary<int, int>
+        private static readonly Dictionary<int, int> ReplaceItemId = new Dictionary<int, int>
         {
             { -1461508848, 1545779598 },
             { 2115555558, 588596902 },
@@ -5847,7 +5948,7 @@ namespace Oxide.Plugins
             public bool EachToEach;
             public uint BuildingId = 0;
 
-#if CPDEBUG
+#if DEBUG
             public Stopwatch Sw = new Stopwatch();
 #endif
         }
@@ -5883,19 +5984,19 @@ namespace Oxide.Plugins
             public bool Ownership;
             public bool CheckPlaced = true;
             public bool EnableSaving = true;
-            public Coroutine RunningCoroutine;
             public bool Dlc = true;
             public SkinsMode SkinsMode = SkinsMode.AllSkins;
 
             public bool Cancelled = false;
 
             public uint BuildingId = 0;
-
             public int CupboardCount;
+            public List<Dictionary<string, object>> DelayedCupboardsData;
+            public bool ReplayingDelayedCupboards;
 
             public VersionNumber Version { get; set; }
 
-#if CPDEBUG
+#if DEBUG
             public Stopwatch Sw = new Stopwatch();
 #endif
         }
