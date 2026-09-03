@@ -2,6 +2,7 @@
 // #define DEBUG
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
@@ -41,7 +42,7 @@ using System.Diagnostics;
 
 namespace Oxide.Plugins
 {
-    [Info("Copy Paste", "misticos", "4.2.8")]
+    [Info("Copy Paste", "misticos", "4.3.0")]
     [Description("Copy and paste buildings to save them or move them")]
     public class CopyPaste : CovalencePlugin
     {
@@ -79,8 +80,13 @@ namespace Oxide.Plugins
         private bool _pasteReady;
         private readonly List<PasteData> _pendingPastes = new();
 
-        private Dictionary<string, Stack<List<BaseEntity>>> _lastPastes =
-            new Dictionary<string, Stack<List<BaseEntity>>>();
+        public class LastPaste
+        {
+            public string Filename;
+            public List<BaseEntity> Entities = new();
+        }
+
+        private Dictionary<string, Stack<LastPaste>> _lastPastes = new();
 
         private Dictionary<string, SignSize> _signSizes = new Dictionary<string, SignSize>
         {
@@ -157,41 +163,77 @@ namespace Oxide.Plugins
             BlockSpecifiedOnly = 4
         }
 
+        public enum LoopMode
+        {
+            TimedDelay = 1,
+            PerFrame = 2,
+            Instant = 3
+        }
+
+        public enum PasteErrorMode
+        {
+            Stop = 1,
+            UndoPasted = 2,
+            Continue = 3
+        }
+
         //Config
 
         private ConfigData _config;
 
         private class ConfigData
         {
-            [JsonProperty(PropertyName = "Copy Options")]
+            [JsonProperty(PropertyName = "Copy Options", Order = 7)]
             public CopyOptions Copy { get; set; }
 
-            [JsonProperty(PropertyName = "Paste Options")]
+            [JsonProperty(PropertyName = "Paste Options", Order = 8)]
             public PasteOptions Paste { get; set; }
 
             [JsonProperty(PropertyName =
-                "Amount of entities to paste per batch. Use to tweak performance impact of pasting")]
-            [DefaultValue(15)]
-            public int PasteBatchSize = 15;
+                "Amount of entities to paste per batch. Use to tweak performance impact of pasting",  Order = 1)]
+            [DefaultValue(5)]
+            public int PasteBatchSize = 5;
 
             [JsonProperty(PropertyName =
-                "Amount of entities to copy per batch. Use to tweak performance impact of copying")]
+                "Amount of entities to copy per batch. Use to tweak performance impact of copying",  Order = 2)]
             [DefaultValue(100)]
             public int CopyBatchSize = 100;
 
             [JsonProperty(PropertyName =
-                "Amount of entities to undo per batch. Use to tweak performance impact of undoing")]
-            [DefaultValue(15)]
-            public int UndoBatchSize = 15;
+                "Amount of entities to undo per batch. Use to tweak performance impact of undoing",  Order = 3)]
+            [DefaultValue(5)]
+            public int UndoBatchSize = 5;
+
+            [JsonProperty(PropertyName = "Loop Execution", Order = 4)]
+            public LoopExecutionConfig LoopExecution { get; set; } = new();
 
             [JsonProperty(PropertyName =
-                "Prevent These Prefabs From Spawning", ObjectCreationHandling = ObjectCreationHandling.Replace),
+                "Prevent These Prefabs From Spawning", ObjectCreationHandling = ObjectCreationHandling.Replace, Order = 5),
             DefaultValue(typeof(List<string>), "")]
             public List<string> BlockedPrefabs = new();
 
-            [JsonProperty(PropertyName = "Enable data saving feature")]
+            [JsonProperty(PropertyName = "Enable data saving feature", Order = 6)]
             [DefaultValue(true)]
             public bool DataSaving = true;
+
+            public class LoopExecutionConfig
+            {
+                [JsonProperty(PropertyName = "Mode: (1=timed delay [safest], 2=per-frame [balanced], 3=instant [lag])", Order = 1)]
+                [DefaultValue((int)LoopMode.TimedDelay)]
+                public int Mode { get; set; } = (int)LoopMode.TimedDelay;
+
+                [JsonProperty(PropertyName = "Timed delay between paste batches, in seconds", Order = 2)]
+                [DefaultValue(0.075)]
+                public float PasteBatchDelay = 0.075f;
+
+                [JsonProperty(PropertyName = "Timed delay between copy batches, in seconds", Order = 3)]
+                [DefaultValue(0.075)]
+                public float CopyBatchDelay = 0.075f;
+
+                [JsonProperty(PropertyName = "Timed delay between undo batches, in seconds", Order = 4)]
+                [DefaultValue(0.075)]
+                public float UndoBatchDelay = 0.075f;
+            }
 
             public class CopyOptions
             {
@@ -246,6 +288,10 @@ namespace Oxide.Plugins
                 [DefaultValue((int)CopyPaste.SkinsMode.AllSkins)]
                 public int SkinsMode { get; set; } = (int)CopyPaste.SkinsMode.AllSkins;
 
+                [JsonProperty(PropertyName = "When an entity fails to paste: (1=stop, 2=undo pasted, 3=continue)")]
+                [DefaultValue((int)CopyPaste.PasteErrorMode.Stop)]
+                public int PasteErrorMode { get; set; } = (int)CopyPaste.PasteErrorMode.Stop;
+
                 [JsonProperty(PropertyName = "Specified Skins (skin id, like 2601577757, or item shortname for redirected skins, like hazmatsuit.spacesuit)")]
                 public List<object> SpecifiedSkins { get; set; } = new();
 
@@ -265,6 +311,9 @@ namespace Oxide.Plugins
 
             _config = Config.ReadObject<ConfigData>();
 
+            _config.Copy ??= new();
+            _config.Paste ??= new();
+            _config.LoopExecution ??= new();
             _config.BlockedPrefabs ??= new();
             _config.Paste.SpecifiedSkins ??= new();
 
@@ -272,6 +321,21 @@ namespace Oxide.Plugins
             {
                 PrintWarning("Invalid config value specified for 'Skins', resetting to default of 1 (all skins)");
                 _config.Paste.SkinsMode = (int)SkinsMode.AllSkins;
+            }
+
+            if (!IsValidLoopMode(_config.LoopExecution.Mode))
+            {
+                PrintWarning("Invalid config value specified for 'Loop Execution Mode', resetting to default of 1 (timed delay)");
+                _config.LoopExecution.Mode = (int)LoopMode.TimedDelay;
+            }
+
+            if (_config.LoopExecution.Mode == (int)LoopMode.Instant)
+                PrintWarning("Loop execution mode is set to instant. Large operations can lag the server and may kick players.");
+
+            if (!IsValidPasteErrorMode(_config.Paste.PasteErrorMode))
+            {
+                PrintWarning("Invalid config value specified for 'When an entity fails to paste', resetting to default of 1 (stop)");
+                _config.Paste.PasteErrorMode = (int)PasteErrorMode.Stop;
             }
 
             for (var i = 0; i < _config.Paste.SpecifiedSkins.Count; i++)
@@ -296,13 +360,18 @@ namespace Oxide.Plugins
             var configData = new ConfigData
             {
                 Copy = new ConfigData.CopyOptions(),
-                Paste = new ConfigData.PasteOptions()
+                Paste = new ConfigData.PasteOptions(),
+                LoopExecution = new ConfigData.LoopExecutionConfig()
             };
 
             Config.WriteObject(configData, true);
         }
 
         private bool IsValidSkinsMode(int mode) => Enum.IsDefined(typeof(SkinsMode), mode);
+
+        private bool IsValidLoopMode(int opt) => Enum.IsDefined(typeof(LoopMode), opt);
+
+        private bool IsValidPasteErrorMode(int mode) => Enum.IsDefined(typeof(PasteErrorMode), mode);
 
         //Hooks
 
@@ -331,10 +400,7 @@ namespace Oxide.Plugins
             {
                 lang.RegisterMessages(cLangs.Value, this, cLangs.Key);
             }
-        }
 
-        private void OnServerInitialized()
-        {
             LoadVariables();
 
             Vis.colBuffer = new Collider[8192 * 16];
@@ -393,7 +459,10 @@ namespace Oxide.Plugins
             for (int i = 0; i < _pendingPastes.Count; i++)
             {
                 var pasteData = _pendingPastes[i];
-                timer.Once(i * 0.1f, () => PasteLoop(pasteData));
+                timer.Once(i * 0.1f, () =>
+                {
+                    pasteData.StartLoop(PasteLoop(pasteData));
+                });
             }
             _pendingPastes.Clear();
         }
@@ -414,15 +483,13 @@ namespace Oxide.Plugins
 
         public static bool IsDlcItem(ItemDefinition definition)
         {
-            var bp = definition.Blueprint;
-            var parent = definition.Parent ?? definition.isRedirectOf;
-            var parentBp = parent?.Blueprint;
+            var parent = definition.Parent;
             return
-                (definition.steamItem is not null && definition.steamItem.id != 0) ||
-                (definition.steamDlc is not null && definition.steamDlc.dlcAppID != 0) ||
-                (bp is not null && bp.NeedsSteamDLC) ||
-                (parentBp is not null && parentBp.NeedsSteamDLC) ||
-                definition.isRedirectOf is not null;
+                (definition.steamItem != null && definition.steamItem.id != 0) ||
+                (definition.steamDlc != null && definition.steamDlc.dlcAppID != 0) ||
+                (definition.Blueprint != null && definition.steamDlc != null) ||
+                (parent != null && parent.Blueprint != null && parent.steamDlc != null) ||
+                definition.isRedirectOf != null;
         }
 
         public ulong FilterSkinId(PasteData pasteData, ulong skinId)
@@ -512,18 +579,18 @@ namespace Oxide.Plugins
         }
 
         private object TryPasteFromVector3(Vector3 pos, float rotationCorrection, string filename, string[] args,
-            Action callback = null, Action<BaseEntity> callbackSpawned = null)
+            Action callback = null, Action<BaseEntity> callbackSpawned = null, int loopMode = 0)
         {
             return TryPaste(pos, filename, _consolePlayer, rotationCorrection, args, callback: callback,
-                callbackSpawned: callbackSpawned).Item1;
+                callbackSpawned: callbackSpawned, loopMode: loopMode).Item1;
         }
 
         private ValueTuple<object, Action> TryPasteFromVector3Cancellable(Vector3 pos, float rotationCorrection,
             string filename, string[] args,
-            Action callback = null, Action<BaseEntity> callbackSpawned = null)
+            Action callback = null, Action<BaseEntity> callbackSpawned = null, int loopMode = 0)
         {
             var result = TryPaste(pos, filename, _consolePlayer, rotationCorrection, args, callback: callback,
-                callbackSpawned: callbackSpawned);
+                callbackSpawned: callbackSpawned, loopMode: loopMode);
 
             var pasteData = result.Item2;
 
@@ -595,7 +662,7 @@ namespace Oxide.Plugins
             var io = entity as IOEntity;
             if (io != null)
             {
-                io.ClearConnections();
+                try { io.ClearConnections(); } catch { } // this can throw
             }
 
             var autoTurret = entity as AutoTurret;
@@ -607,42 +674,41 @@ namespace Oxide.Plugins
             entity.Kill();
         }
 
-        private void UndoLoop(HashSet<BaseEntity> entities, IPlayer player, int count = 0)
+        private IEnumerator UndoLoop(UndoData undoData)
         {
+            var entities = undoData.EntitiesToUndo;
+            var player = undoData.Player;
+
             for (var i = entities.Count - 1; i >= 0; i--)
             {
                 var baseEntity = entities.ElementAt(i);
                 if (baseEntity is IItemContainerEntity)
                 {
-                    RemoveEntity(baseEntity);
                     entities.Remove(baseEntity);
+                    // Don't .Kill() the drone storage as it'll cause Drone.Update_Server() to NRE
+                    if (baseEntity is DroneStorage droneStorage && droneStorage.inventory != null)
+                    {
+                        droneStorage.inventory.Clear();
+                        continue;
+                    }
+                    RemoveEntity(baseEntity);
                 }
             }
 
+            int entityIndex = 0;
             // Take an amount of entities from the entity list (defined in config) and kill them. Will be repeated for every tick until there are no entities left.
-            entities
-                .Take(_config.UndoBatchSize)
-                .ToList()
-                .ForEach(p =>
-                {
-                    entities.Remove(p);
-                    RemoveEntity(p);
-                });
-
-            // If it gets stuck in infinite loop break the loop.
-            if (count != 0 && entities.Count != 0 && entities.Count == count)
+            foreach (var p in entities)
             {
-                player?.Reply("Undo cancelled because of infinite loop.");
-                return;
+                RemoveEntity(p);
+                if (++entityIndex % _config.UndoBatchSize == 0 && undoData.TryGetBatchYield(_config.LoopExecution.UndoBatchDelay, out var batchYield))
+                    yield return batchYield;
             }
 
-            if (entities.Count > 0)
-                NextTick(() => UndoLoop(entities, player, entities.Count));
-            else if (player != null)
+            if (player != null)
             {
-                player.Reply(Lang("UNDO_SUCCESS", player.Id));
+                player.Reply(Lang("UNDO_SUCCESS", player.Id) + ": " + undoData.Filename);
 
-                if (_lastPastes.ContainsKey(player.Id) && _lastPastes[player.Id].Count == 0)
+                if (_lastPastes.TryGetValue(player.Id, out var checkFrom) && checkFrom.Count == 0)
                     _lastPastes.Remove(player.Id);
             }
         }
@@ -670,126 +736,127 @@ namespace Oxide.Plugins
                 SourceRot = sourceRot,
                 Player = player,
                 BasePlayer = player.Object as BasePlayer,
-                Callback = callback
+                Callback = callback,
+                ExecutionMode = (LoopMode)_config.LoopExecution.Mode
             };
 
             copyData.CheckFrom.Push(sourcePos);
 
-            NextTick(() => CopyLoop(copyData));
+            copyData.StartLoop(CopyLoop(copyData));
         }
 
         // Main loop for copy, will fetch all the data needed. Is called every tick untill copy is done (can't find any entities)
-        private void CopyLoop(CopyData copyData)
+        private IEnumerator CopyLoop(CopyData copyData)
         {
             var checkFrom = copyData.CheckFrom;
             var houseList = copyData.HouseList;
             var buildingId = copyData.BuildingId;
             var copyMechanics = copyData.CopyMechanics;
-            var batchSize = checkFrom.Count < _config.CopyBatchSize ? checkFrom.Count : _config.CopyBatchSize;
             var range = copyData.Range;
 
-            for (var i = 0; i < batchSize; i++)
+            while (checkFrom.Count > 0)
             {
-                if (checkFrom.Count == 0)
-                    break;
+                var batchSize = checkFrom.Count < _config.CopyBatchSize ? checkFrom.Count : _config.CopyBatchSize;
 
-                var list = Pool.Get<List<BaseEntity>>();
-                try
+                for (var i = 0; i < batchSize; i++)
                 {
-                    Vis.Entities(checkFrom.Pop(), range, list, copyData.CurrentLayer);
+                    if (checkFrom.Count == 0)
+                        break;
 
-                    foreach (var entity in list)
+                    var list = Pool.Get<List<BaseEntity>>();
+                    try
                     {
-                        // Skip entities that are already in the list
-                        if (!entity.IsValid() || entity.HasParent())
-                            continue;
-                        
-                        // Skip metal detector flags
-                        if (entity.GetComponent<MetalDetectorSource>() != null)
-                            continue;
-                        
-                        if (!houseList.Add(entity))
-                            continue;
+                        Vis.Entities(checkFrom.Pop(), range, list, copyData.CurrentLayer);
 
-                        var buildingBlock = entity as BuildingBlock;
-                        if (copyMechanics == CopyMechanics.Building)
+                        foreach (var entity in list)
                         {
-                            buildingBlock ??= entity.GetComponentInParent<BuildingBlock>();
+                            // Skip entities that are already in the list
+                            if (!entity.IsValid() || entity.HasParent())
+                                continue;
+
+                            // Skip metal detector flags
+                            if (entity.GetComponent<MetalDetectorSource>() != null)
+                                continue;
+
+                            if (!houseList.Add(entity))
+                                continue;
+
+                            var buildingBlock = entity as BuildingBlock;
+                            if (copyMechanics == CopyMechanics.Building)
+                            {
+                                buildingBlock ??= entity.GetComponentInParent<BuildingBlock>();
+
+                                if (buildingBlock != null)
+                                {
+                                    if (buildingId == 0)
+                                        buildingId = buildingBlock.buildingID;
+
+                                    if (buildingId != buildingBlock.buildingID)
+                                        continue;
+                                }
+                            }
 
                             if (buildingBlock != null)
-                            {
-                                if (buildingId == 0)
-                                    buildingId = buildingBlock.buildingID;
+                                QueueConnectedBlocks(copyData, buildingBlock);
 
-                                if (buildingId != buildingBlock.buildingID)
-                                    continue;
-                            }
+                            var transform = entity.transform;
+                            if (copyData.EachToEach && copyData.ScannedPositions.Add(transform.position))
+                                checkFrom.Push(transform.position);
+
+                            if (entity.GetComponent<BaseLock>() != null)
+                                continue;
+
+                            copyData.RawData.Add(EntityData(entity, transform.position,
+                                transform.rotation.eulerAngles / Mathf.Rad2Deg, copyData));
                         }
-
-                        if (buildingBlock != null)
-                            QueueConnectedBlocks(copyData, buildingBlock);
-
-                        var transform = entity.transform;
-                        if (copyData.EachToEach && copyData.ScannedPositions.Add(transform.position))
-                            checkFrom.Push(transform.position);
-
-                        if (entity.GetComponent<BaseLock>() != null)
-                            continue;
-                        
-                        copyData.RawData.Add(EntityData(entity, transform.position,
-                            transform.rotation.eulerAngles / Mathf.Rad2Deg, copyData));
                     }
-                }
-                finally
-                {
-                    Pool.FreeUnmanaged(ref list);
-                }
-
-                copyData.BuildingId = buildingId;
-            }
-
-            if (checkFrom.Count > 0)
-            {
-                NextTick(() => CopyLoop(copyData));
-            }
-            else
-            {
-                var path = _subDirectory + copyData.Filename;
-                var datafile = Interface.Oxide.DataFileSystem.GetFile(path);
-
-                datafile.Clear();
-
-                var sourcePos = copyData.SourcePos;
-
-                datafile["default"] = new Dictionary<string, object>
-                {
+                    finally
                     {
-                        "position", new Dictionary<string, object>
+                        Pool.FreeUnmanaged(ref list);
+                    }
+
+                    copyData.BuildingId = buildingId;
+                }
+
+                if (checkFrom.Count > 0 && copyData.TryGetBatchYield(_config.LoopExecution.CopyBatchDelay, out var batchYield))
+                    yield return batchYield;
+            }
+
+            var path = _subDirectory + copyData.Filename;
+            var datafile = Interface.Oxide.DataFileSystem.GetFile(path);
+
+            datafile.Clear();
+
+            var sourcePos = copyData.SourcePos;
+
+            datafile["default"] = new Dictionary<string, object>
+            {
+                {
+                    "position", new Dictionary<string, object>
                         {
                             { "x", sourcePos.x.ToString() },
                             { "y", sourcePos.y.ToString() },
                             { "z", sourcePos.z.ToString() }
                         }
-                    },
-                    { "rotationy", copyData.SourceRot.y.ToString() },
-                    { "rotationdiff", copyData.RotCor.ToString() }
-                };
+                },
+                { "rotationy", copyData.SourceRot.y.ToString() },
+                { "rotationdiff", copyData.RotCor.ToString() }
+            };
 
-                datafile["entities"] = copyData.RawData;
-                datafile["protocol"] = new Dictionary<string, object>
-                {
-                    { "items", 2 },
-                    { "version", Version }
-                };
+            datafile["entities"] = copyData.RawData;
+            datafile["protocol"] = new Dictionary<string, object>
+            {
+                { "items", 2 },
+                { "version", Version }
+            };
 
-                Interface.Oxide.DataFileSystem.SaveDatafile(path);
+            Interface.Oxide.DataFileSystem.SaveDatafile(path);
 
-                copyData.Player.Reply(Lang("COPY_SUCCESS", copyData.Player.Id, copyData.Filename));
+            copyData.Player.Reply(Lang("COPY_SUCCESS", copyData.Player.Id, copyData.Filename));
 
-                copyData.Callback?.Invoke();
+            copyData.Callback?.Invoke();
 
-                Interface.CallHook("OnCopyFinished", copyData.RawData, copyData.Filename, copyData.Player, copyData.SourcePos);
-            }
+            Interface.CallHook("OnCopyFinished", copyData.RawData, copyData.Filename, copyData.Player, copyData.SourcePos);
         }
 
         private void QueueConnectedBlocks(CopyData copyData, BuildingBlock block)
@@ -989,6 +1056,14 @@ namespace Oxide.Plugins
             if (photoEntity != null)
             {
                 ExtractTextures(data, photoEntity.GetContentCRCs, entity, FileStorage.Type.jpg);
+            }
+
+            var baseSculpture = entity as BaseSculpture;
+            if (baseSculpture != null && baseSculpture.crc != 0)
+            {
+                var sculptureData = FileStorage.server.Get(baseSculpture.crc, FileStorage.Type.sculpt, entity.net.ID);
+                if (sculptureData != null && sculptureData.Length != 0)
+                    data.Add("sculpture", Convert.ToBase64String(sculptureData));
             }
 
             var photoFrame = entity as PhotoFrame;
@@ -1279,7 +1354,18 @@ namespace Oxide.Plugins
                         { "currencyAmountPerItem", vendItem.currencyAmountPerItem },
                         { "inStock", vendItem.inStock },
                         { "currencyIsBP", vendItem.currencyIsBP },
-                        { "itemToSellIsBP", vendItem.itemToSellIsBP }
+                        { "itemToSellIsBP", vendItem.itemToSellIsBP },
+                        { "itemCondition", vendItem.itemCondition },
+                        { "itemConditionMax", vendItem.itemConditionMax },
+                        { "instanceData", vendItem.instanceData },
+                        { "attachmentsList", vendItem.attachmentsList },
+                        { "totalAttachmentSlots", vendItem.totalAttachmentSlots },
+                        { "priceMultiplier", vendItem.priceMultiplier },
+                        { "ammoType", vendItem.ammoType },
+                        { "ammoCount", vendItem.ammoCount },
+                        { "receivedQuantityMultiplier", vendItem.receivedQuantityMultiplier },
+                        { "sellSkinId", vendItem.sellSkinId },
+                        { "costSkinId", vendItem.costSkinId }
                     });
                 }
 
@@ -1340,6 +1426,33 @@ namespace Oxide.Plugins
             var boomBox = entity.GetComponent<BoomBox>();
             if (boomBox != null)
                 ExtractBoomBox(data, boomBox);
+
+            var deployableBoomBox = entity as DeployableBoomBox;
+            if (deployableBoomBox != null)
+                data.Add("volume", deployableBoomBox.Volume);
+
+            var dartsGameBoard = entity as DartsGameBoard;
+            if (dartsGameBoard != null && dartsGameBoard.Leaderboard != null && dartsGameBoard.Leaderboard.Count > 0)
+            {
+                var leaderboard = new List<object>(Math.Min(dartsGameBoard.Leaderboard.Count, 5));
+                for (var i = 0; i < dartsGameBoard.Leaderboard.Count && i < 5; i++)
+                {
+                    var entry = dartsGameBoard.Leaderboard[i];
+                    if (entry == null)
+                        continue;
+
+                    leaderboard.Add(new Dictionary<string, object>
+                    {
+                        { "userid", entry.userid },
+                        { "playerName", entry.playerName },
+                        { "dartsThrown", entry.dartsThrown },
+                        { "timeTaken", entry.timeTaken }
+                    });
+                }
+
+                if (leaderboard.Count > 0)
+                    data.Add("dartsLeaderboard", leaderboard);
+            }
 
             var ioEntity = entity as IOEntity;
 
@@ -1639,7 +1752,8 @@ namespace Oxide.Plugins
         private PasteData Paste(ICollection<Dictionary<string, object>> entities, Dictionary<string, object> protocol,
             bool ownership, Vector3 startPos, IPlayer player, bool stability, float rotationCorrection,
             float heightAdj, bool auth, Action callback, Action<BaseEntity> callbackSpawned, string filename,
-            bool checkPlaced, bool enableSaving = true, bool? dlc = null, int? skinsMode = null)
+            bool checkPlaced, bool enableSaving = true, bool? dlc = null, int? skinsMode = null,
+            int? loopMode = null, int? pasteErrorMode = null)
         {
             //Settings
 
@@ -1676,7 +1790,13 @@ namespace Oxide.Plugins
                 Dlc = dlc ?? _config.Paste.Dlc,
                 SkinsMode = (SkinsMode)(skinsMode.HasValue && IsValidSkinsMode(skinsMode.Value)
                     ? skinsMode.Value
-                    : _config.Paste.SkinsMode)
+                    : _config.Paste.SkinsMode),
+                ExecutionMode = (LoopMode)(loopMode.HasValue && IsValidLoopMode(loopMode.Value)
+                    ? loopMode.Value
+                    : _config.LoopExecution.Mode),
+                PasteErrorMode = (PasteErrorMode)(pasteErrorMode.HasValue && IsValidPasteErrorMode(pasteErrorMode.Value)
+                    ? pasteErrorMode.Value
+                    : _config.Paste.PasteErrorMode)
             };
 
             if (!_pasteReady)
@@ -1685,102 +1805,133 @@ namespace Oxide.Plugins
                 _pendingPastes.Add(pasteData);
             }
             else
-                NextTick(() => PasteLoop(pasteData));
+                NextTick(() => pasteData.StartLoop(PasteLoop(pasteData)));
 
             return pasteData;
         }
 
-        private void PasteLoop(PasteData pasteData)
+        private IEnumerator PasteLoop(PasteData pasteData)
         {
             if (pasteData.Cancelled)
             {
-                UndoLoop(new HashSet<BaseEntity>(pasteData.PastedEntities), pasteData.Player,
-                    pasteData.PastedEntities.Count);
-                
-                return;
+                var undoData = new UndoData
+                {
+                    EntitiesToUndo = pasteData.PastedEntities,
+                    Player = pasteData.Player,
+                    ExecutionMode = pasteData.ExecutionMode,
+                    Filename = pasteData.Filename
+                };
+
+                undoData.StartLoop(UndoLoop(undoData));
+
+                yield break;
             }
 
-            var entities = pasteData.Entities;
-            var todo = entities.Take(_config.PasteBatchSize).ToArray();
+            int entityIndex = 0;
 
-            foreach (var data in todo)
+            foreach (var data in pasteData.Entities.ToList())
             {
-                entities.Remove(data);
+                pasteData.Entities.Remove(data);
 
-                PasteEntity(data, pasteData);
-            }
-
-            if (entities.Count > 0)
-                NextTick(() => PasteLoop(pasteData));
-            else
-            {
-
-                // Adjust IOEntity positions to fix alignment issues for older file versions
-                if (pasteData.Version < new VersionNumber(4, 2, 0))
-                    pasteData.checkPosition = Pool.Get<List<IOEntity>>();
-
-                foreach (var ioData in pasteData.EntityLookup.Values.ToArray())
-                    ProgressIOEntity(ioData, pasteData);
-
-                if (pasteData.checkPosition != null)
+                try
                 {
-                    AdjustIOEntityPositions(pasteData);
-                    Pool.FreeUnmanaged(ref pasteData.checkPosition);
+                    PasteEntity(data, pasteData);
                 }
-
-                foreach (var keyPair in pasteData.ItemsWithSubEntity)
+                catch (Exception ex)
                 {
-                    SetItemSubEntity(pasteData, keyPair.Value, keyPair.Key);
-                }
+                    PrintWarning("There was a problem pasting \"{0}\": Failed to paste entity \"{1}\" - {2}",
+                        pasteData.Filename,
+                        (string)data["prefabname"],
+                        ex);
 
-                if (pasteData.Version <= new VersionNumber(4, 2, 7))
-                    SnapLegacyFloorFrameEntities(pasteData);
+                    pasteData.Player.Reply(Lang("PASTE_FAILED", pasteData.Player.Id, pasteData.Filename));
 
-                foreach (var entity in pasteData.StabilityEntities)
-                {
-                    entity.grounded = false;
-                    entity.InitializeSupports();
-                    entity.UpdateStability();
-                }
-
-                foreach (var adapter in pasteData.industrialStorageAdaptors)
-                {
-                    if (adapter == null) { continue; }
-                    if (!adapter.HasParent())
+                    if (pasteData.PasteErrorMode == PasteErrorMode.UndoPasted)
                     {
-                        List<BaseEntity> ents = Facepunch.Pool.Get<List<BaseEntity>>();
-                        Vis.Entities(adapter.transform.position + (adapter.transform.up * -0.2f), 0.01f, ents);
-                        if (ents.Count > 0)
+                        var undoData = new UndoData
                         {
-                            adapter.SetParent(ents[0], true, true);
-                        }
-                        Facepunch.Pool.FreeUnmanaged(ref ents);
+                            EntitiesToUndo = pasteData.PastedEntities,
+                            Player = pasteData.Player,
+                            ExecutionMode = pasteData.ExecutionMode,
+                            Filename = pasteData.Filename
+                        };
+
+                        undoData.StartLoop(UndoLoop(undoData));
                     }
-                    adapter.MarkDirtyForceUpdateOutputs();
-                    adapter.SendNetworkUpdateImmediate();
-                    adapter.RefreshIndustrialPreventBuilding();
-                    adapter.NotifyIndustrialNetworkChanged();
+
+                    if (pasteData.PasteErrorMode != PasteErrorMode.Continue)
+                        yield break;
                 }
 
-                pasteData.FinalProcessingActions.ForEach(action => action());
+                if (++entityIndex % _config.PasteBatchSize == 0 && pasteData.TryGetBatchYield(_config.LoopExecution.PasteBatchDelay, out var batchYield))
+                    yield return batchYield;
+            }
 
-                TrySplitPastedBuilding(pasteData);
-                PasteDelayedCupboards(pasteData);
+            // Adjust IOEntity positions to fix alignment issues for older file versions
+            if (pasteData.Version < new VersionNumber(4, 2, 0))
+                pasteData.checkPosition = Pool.Get<List<IOEntity>>();
 
-                pasteData.Player.Reply(Lang("PASTE_SUCCESS", pasteData.Player.Id));
+            foreach (var ioData in pasteData.EntityLookup.Values.ToArray())
+                ProgressIOEntity(ioData, pasteData);
+
+            if (pasteData.checkPosition != null)
+            {
+                AdjustIOEntityPositions(pasteData);
+                Pool.FreeUnmanaged(ref pasteData.checkPosition);
+            }
+
+            foreach (var keyPair in pasteData.ItemsWithSubEntity)
+            {
+                SetItemSubEntity(pasteData, keyPair.Value, keyPair.Key);
+            }
+
+            if (pasteData.Version <= new VersionNumber(4, 2, 7))
+                SnapLegacyFloorFrameEntities(pasteData);
+
+            foreach (var entity in pasteData.StabilityEntities)
+            {
+                entity.grounded = false;
+                entity.InitializeSupports();
+                entity.UpdateStability();
+            }
+
+            foreach (var adapter in pasteData.industrialStorageAdaptors)
+            {
+                if (adapter == null || adapter.IsDestroyed) { continue; } // checking both is good too
+                if (!adapter.HasParent())
+                {
+                    using var ents = Facepunch.Pool.Get<PooledList<BaseEntity>>(); // prevent pool leak on SetParent exception, caused by other plugins
+                    Vis.Entities(adapter.transform.position + (adapter.transform.up * -0.2f), 0.01f, ents);
+                    if (ents.Count > 0)
+                    {
+                        adapter.SetParent(ents[0], true, true);
+                    }
+                }
+                adapter.MarkDirtyForceUpdateOutputs();
+                adapter.SendNetworkUpdateImmediate();
+                adapter.RefreshIndustrialPreventBuilding();
+                adapter.NotifyIndustrialNetworkChanged();
+            }
+
+            pasteData.FinalProcessingActions.ForEach(action => action());
+
+            TrySplitPastedBuilding(pasteData);
+            PasteDelayedCupboards(pasteData);
+
+            pasteData.Player.Reply(Lang("PASTE_SUCCESS", pasteData.Player.Id) + ": " + pasteData.Filename);
+
 #if DEBUG
-                pasteData.Player.Reply($"Stopwatch took: {pasteData.Sw.Elapsed.TotalMilliseconds} ms");
+            pasteData.Player.Reply($"Stopwatch took: {pasteData.Sw.Elapsed.TotalMilliseconds} ms");
 #endif
 
-                if (!_lastPastes.ContainsKey(pasteData.Player.Id))
-                    _lastPastes[pasteData.Player.Id] = new Stack<List<BaseEntity>>();
+            if (!_lastPastes.TryGetValue(pasteData.Player.Id, out var checkFrom))
+                _lastPastes[pasteData.Player.Id] = checkFrom = new();
 
-                _lastPastes[pasteData.Player.Id].Push(pasteData.PastedEntities);
+            checkFrom.Push(new() { Entities = pasteData.PastedEntities, Filename = pasteData.Filename });
 
-                pasteData.CallbackFinished?.Invoke();
+            pasteData.CallbackFinished?.Invoke();
 
-                Interface.CallHook("OnPasteFinished", pasteData.PastedEntities, pasteData.Filename, pasteData.Player, pasteData.StartPos);
-            }
+            Interface.CallHook("OnPasteFinished", pasteData.PastedEntities, pasteData.Filename, pasteData.Player, pasteData.StartPos);
         }
 
         private void TrySplitPastedBuilding(PasteData pasteData)
@@ -2339,6 +2490,10 @@ namespace Oxide.Plugins
 
             if (entity == null)
                 return;
+
+            var savedFlags = data.TryGetValue("flags", out var obj) && obj is Dictionary<string, object> rawFlags ? rawFlags : null;
+            var restoredDoorAnimationFlagsBeforeSpawn = false;
+            var pastedDoor = entity as Door;
             
             var transform = entity.transform;
             
@@ -2349,9 +2504,9 @@ namespace Oxide.Plugins
                 {
                     var playerBoat = parent as PlayerBoat;
                     bool needsNormalParenting = entity is DroppedItem;
-                    bool playerBotEntity = playerBoat != null && !needsNormalParenting;
+                    bool playerBoatEntity = playerBoat != null && !needsNormalParenting;
 
-                    if (playerBotEntity)
+                    if (playerBoatEntity)
                     {
                         if (!pasteData.playerBoats.ContainsKey(playerBoat))
                             pasteData.playerBoats[playerBoat] = new();
@@ -2386,7 +2541,7 @@ namespace Oxide.Plugins
                     {
                         photo.AddToEasel(parent);
                     }
-                    else if (!playerBotEntity && ShouldInvokeOnDeployed(entity))
+                    else if (!playerBoatEntity && ShouldInvokeOnDeployed(entity))
                     {
                         entity.OnDeployed(parent, null, _emptyItem);
                     }
@@ -2493,10 +2648,28 @@ namespace Oxide.Plugins
             }
 
             if (!entity.isSpawned)
+            {
+                if (pastedDoor != null && savedFlags != null)
+                {
+                    restoredDoorAnimationFlagsBeforeSpawn = RestoreDoorAnimationFlagsBeforeSpawn(pastedDoor, savedFlags);
+                }
+
                 entity.Spawn();
+            }
 
             if (entity.net == null || entity.IsDestroyed)
                 return;
+
+            var baseSculpture = entity as BaseSculpture;
+            if (baseSculpture != null)
+            {
+                if (data.TryGetValue("sculpture", out var sculptureObj) &&
+                    sculptureObj is string encodedSculpture &&
+                    !String.IsNullOrEmpty(encodedSculpture))
+                {
+                    baseSculpture.LoadFromData(Convert.FromBase64String(encodedSculpture));
+                }
+            }
 
             var baseCombat = entity as BaseCombatEntity;
             if (buildingBlock != null)
@@ -2517,12 +2690,9 @@ namespace Oxide.Plugins
                     if (data.TryGetValue(idKey, out rawValue))
                     {
                         ulong wallpaperId = Convert.ToUInt64(rawValue);
-                        if (wallpaperId == 0UL)
-                            continue;
-
                         int currentSide = side;
                         float rotation = 0f;
-                        float health = BuildingBlock.WALLPAPER_MAXHEALTH;
+                        float health = 0f;
 
                         string rotationKey = currentSide == 0 ? "wallpaperRotation" : "wallpaperRotation2";
                         if (data.TryGetValue(rotationKey, out rawValue))
@@ -2532,21 +2702,27 @@ namespace Oxide.Plugins
                         if (data.TryGetValue(healthKey, out rawValue))
                             health = Convert.ToSingle(rawValue);
 
-                        // Defer wallpaper until all building blocks are pasted.
-                        // Interior wallpaper (side 1) must be "inside" (fully enclosed)
-                        // or it will despawn on the next stability tick
-                        pasteData.FinalProcessingActions.Add(() =>
+                        if (health > 0)
                         {
-                            if (buildingBlock == null || !buildingBlock.IsValid() || buildingBlock.IsDestroyed)
-                                return;
+                            if (health > BuildingBlock.WALLPAPER_MAXHEALTH)
+                                health = BuildingBlock.WALLPAPER_MAXHEALTH;
 
-                            buildingBlock.SetWallpaper(wallpaperId, currentSide, rotation);
+                            // Defer wallpaper until all building blocks are pasted.
+                            // Interior wallpaper (side 1) must be "inside" (fully enclosed)
+                            // or it will despawn on the next stability tick
+                            pasteData.FinalProcessingActions.Add(() =>
+                            {
+                                if (buildingBlock == null || !buildingBlock.IsValid() || buildingBlock.IsDestroyed)
+                                    return;
 
-                            if (currentSide == 0)
-                                buildingBlock.wallpaperHealth = health;
-                            else
-                                buildingBlock.wallpaperHealth2 = health;
-                        });
+                                buildingBlock.SetWallpaper(wallpaperId, currentSide, rotation);
+
+                                if (currentSide == 0)
+                                    buildingBlock.wallpaperHealth = health;
+                                else
+                                    buildingBlock.wallpaperHealth2 = health;
+                            });
+                        }
                     }
                 }
             }
@@ -2688,7 +2864,7 @@ namespace Oxide.Plugins
                 if (iSignage is Signage sign)
                 {
                     if (Convert.ToBoolean(signData["locked"]))
-                        sign.SetFlag(BaseEntity.Flags.Locked, true);
+                        SetEntityFlag(sign, BaseEntity.Flags.Locked, true);
 
                     sign.SendNetworkUpdate();
                 }
@@ -2900,7 +3076,7 @@ namespace Oxide.Plugins
                 }
 
                 boatBuildingStation.Netting.gameObject.SetActive(false);
-                boatBuildingStation.SetFlag(BaseEntity.Flags.On, false);
+                SetEntityFlag(boatBuildingStation, BaseEntity.Flags.On, false);
                 boatBuildingStation.StopAutoCloseInvoke();
             }
 
@@ -3058,7 +3234,7 @@ namespace Oxide.Plugins
             var mobileInventoryEntity = entity as MobileInventoryEntity;
             if (mobileInventoryEntity != null)
             {
-                mobileInventoryEntity.SetFlag(MobileInventoryEntity.Ringing, false);
+                SetEntityFlag(mobileInventoryEntity, MobileInventoryEntity.Ringing, false);
             }
 
             var elevator = entity as Elevator;
@@ -3105,7 +3281,7 @@ namespace Oxide.Plugins
                             }
 
                             if (elevator.IsTop != restoreState.IsTop)
-                                elevator.SetFlag(BaseEntity.Flags.Reserved1, restoreState.IsTop);
+                                SetEntityFlag(elevator, BaseEntity.Flags.Reserved1, restoreState.IsTop);
 
                             if (!restoreState.IsTop)
                                 return;
@@ -3198,7 +3374,7 @@ namespace Oxide.Plugins
                 var vendingData = data["vendingmachine"] as Dictionary<string, object>;
 
                 vendingMachine.shopName = vendingData["shopName"].ToString();
-                vendingMachine.SetFlag(BaseEntity.Flags.Reserved4,
+                SetEntityFlag(vendingMachine, BaseEntity.Flags.Reserved4,
                     Convert.ToBoolean(vendingData["isBroadcasting"]));
 
                 var sellOrders = vendingData["sellOrders"] as List<object>;
@@ -3223,7 +3399,7 @@ namespace Oxide.Plugins
                         currencyId = GetItemId(currencyId);
                     }
 
-                    vendingMachine.sellOrders.sellOrders.Add(new ProtoBuf.VendingMachine.SellOrder
+                    var sellOrder = new ProtoBuf.VendingMachine.SellOrder
                     {
                         ShouldPool = false,
                         itemToSellID = itemToSellId,
@@ -3233,7 +3409,46 @@ namespace Oxide.Plugins
                         inStock = Convert.ToInt32(orderInfo["inStock"]),
                         currencyIsBP = Convert.ToBoolean(orderInfo["currencyIsBP"]),
                         itemToSellIsBP = Convert.ToBoolean(orderInfo["itemToSellIsBP"])
-                    });
+                    };
+
+                    if (orderInfo.TryGetValue("itemCondition", out var itemConditionVal))
+                        sellOrder.itemCondition = Convert.ToSingle(itemConditionVal);
+
+                    if (orderInfo.TryGetValue("itemConditionMax", out var itemConditionMaxVal))
+                        sellOrder.itemConditionMax = Convert.ToSingle(itemConditionMaxVal);
+
+                    if (orderInfo.TryGetValue("instanceData", out var instanceDataVal))
+                        sellOrder.instanceData = Convert.ToInt32(instanceDataVal);
+
+                    if (orderInfo.TryGetValue("totalAttachmentSlots", out var totalAttachmentSlotsVal))
+                        sellOrder.totalAttachmentSlots = Convert.ToInt32(totalAttachmentSlotsVal);
+
+                    if (orderInfo.TryGetValue("priceMultiplier", out var priceMultiplierVal))
+                        sellOrder.priceMultiplier = Convert.ToSingle(priceMultiplierVal);
+
+                    if (orderInfo.TryGetValue("ammoType", out var ammoTypeVal))
+                        sellOrder.ammoType = Convert.ToInt32(ammoTypeVal);
+
+                    if (orderInfo.TryGetValue("ammoCount", out var ammoCountVal))
+                        sellOrder.ammoCount = Convert.ToInt32(ammoCountVal);
+
+                    if (orderInfo.TryGetValue("receivedQuantityMultiplier", out var receivedQuantityMultiplierVal))
+                        sellOrder.receivedQuantityMultiplier = Convert.ToSingle(receivedQuantityMultiplierVal);
+
+                    if (orderInfo.TryGetValue("sellSkinId", out var sellSkinIdVal))
+                        sellOrder.sellSkinId = FilterSkinId(pasteData, Convert.ToUInt64(sellSkinIdVal));
+
+                    if (orderInfo.TryGetValue("costSkinId", out var costSkinIdVal))
+                        sellOrder.costSkinId = FilterSkinId(pasteData, Convert.ToUInt64(costSkinIdVal));
+
+                    if (orderInfo.TryGetValue("attachmentsList", out var attachmentsListVal) && attachmentsListVal is IEnumerable<object> attachmentObjs)
+                    {
+                        sellOrder.attachmentsList = new List<int>();
+                        foreach (var a in attachmentObjs)
+                            sellOrder.attachmentsList.Add(Convert.ToInt32(a));
+                    }
+
+                    vendingMachine.sellOrders.sellOrders.Add(sellOrder);
                 }
 
                 vendingMachine.FullUpdate();
@@ -3256,7 +3471,7 @@ namespace Oxide.Plugins
                             if (newEntityObj is BaseEntity newEntity && newEntity.IsValid() && !newEntity.IsDestroyed &&
                                 newEntity is ITowing iTowing)
                             {
-                                newEntity.SetFlag(BaseEntity.Flags.Reserved14, false);
+                                SetEntityFlag(newEntity, BaseEntity.Flags.Reserved14, false);
                                 ridableHorse2.towingEntityId = newEntity.net.ID;
                                 ridableHorse2.towableEntity = iTowing;
                                 ridableHorse2.TowAttach();
@@ -3353,36 +3568,88 @@ namespace Oxide.Plugins
                     Puts($"{nameof(PasteLoop)}: Convert.ToUInt64 1619");
 #endif
                     var oldId = Convert.ToUInt64(oldIdObject);
-                    pasteData.EntityLookup.Add(oldId, ioData);
+                    if (!pasteData.EntityLookup.ContainsKey(oldId)) // duplicate ID from outdated copy
+                        pasteData.EntityLookup.Add(oldId, ioData);
                 }
             }
             
-            var flagsData = new Dictionary<string, object>();
-
-            if (data.ContainsKey("flags"))
-                flagsData = data["flags"] as Dictionary<string, object>;
-
-            var flags = new Dictionary<BaseEntity.Flags, bool>();
-
-            foreach (var flagData in flagsData)
-            {
-                BaseEntity.Flags baseFlag;
-                if (Enum.TryParse(flagData.Key, out baseFlag))
-                    flags.Add(baseFlag, Convert.ToBoolean(flagData.Value));
-            }
-
             bool skipFlags = entity is Anchor && parent is PlayerBoat;
-            if (!skipFlags)
+            if (!skipFlags && savedFlags != null)
             {
-                foreach (var flag in flags)
-                    entity.SetFlag(flag.Key, flag.Value);
+                using (var updateFlags = entity.StartSetFlags(BaseEntity.FlagsUpdateMode.SendNetworkUpdate))
+                {
+                    foreach ((string name, object value) in savedFlags)
+                    {
+                        if (!Enum.TryParse(name, out BaseEntity.Flags flag))
+                            continue;
+
+                        if (pastedDoor != null)
+                        {
+                            if (flag == BaseEntity.Flags.Busy)
+                                continue;
+
+                            if (restoredDoorAnimationFlagsBeforeSpawn &&
+                                (flag == BaseEntity.Flags.Open || flag == Door.ReverseOpen))
+                                continue;
+                        }
+
+                        updateFlags.Set(flag, Convert.ToBoolean(value));
+                    }
+                }
             }
             
             // If the on flag was saved, toggle it off and enter edit mode so it can be properly triggered on
             if (boatBuildingStation != null && boatBuildingStation.IsOn())
             {
-                boatBuildingStation.SetFlag(BaseEntity.Flags.On, false);
+                SetEntityFlag(boatBuildingStation, BaseEntity.Flags.On, false);
                 boatBuildingStation.EnterEditMode();
+            }
+
+            var deployableBoomBox = entity as DeployableBoomBox;
+            if (deployableBoomBox != null)
+            {
+                if (data.TryGetValue("volume", out var volumeObj))
+                {
+                    deployableBoomBox.Volume = Mathf.Clamp(Convert.ToSingle(volumeObj),
+                        DeployableBoomBox.MinVolume,
+                        DeployableBoomBox.MaxVolume);
+                }
+            }
+
+            var dartsGameBoard = entity as DartsGameBoard;
+            if (dartsGameBoard != null && data.TryGetValue("dartsLeaderboard", out var leaderboardObj))
+            {
+                var leaderboardData = leaderboardObj as List<object>;
+                if (leaderboardData != null)
+                {
+                    if (dartsGameBoard.Leaderboard == null)
+                        dartsGameBoard.Leaderboard = new List<DartsGameLeaderboard.DartsGameLeaderboardEntry>();
+                    else
+                        dartsGameBoard.Leaderboard.Clear();
+
+                    for (var i = 0; i < leaderboardData.Count && i < 5; i++)
+                    {
+                        var entryData = leaderboardData[i] as Dictionary<string, object>;
+                        if (entryData == null)
+                            continue;
+
+                        var entry = new DartsGameLeaderboard.DartsGameLeaderboardEntry();
+                        if (entryData.TryGetValue("userid", out var value))
+                            entry.userid = Convert.ToUInt64(value);
+                        if (entryData.TryGetValue("playerName", out value))
+                            entry.playerName = value?.ToString() ?? string.Empty;
+                        else
+                            entry.playerName = string.Empty;
+                        if (entryData.TryGetValue("dartsThrown", out value))
+                            entry.dartsThrown = Convert.ToInt32(value);
+                        if (entryData.TryGetValue("timeTaken", out value))
+                            entry.timeTaken = Convert.ToSingle(value);
+
+                        dartsGameBoard.Leaderboard.Add(entry);
+                    }
+
+                    dartsGameBoard.SendNetworkUpdate();
+                }
             }
 
             if (data.TryGetValue("boomBox", out var boomBoxObj) &&
@@ -3411,8 +3678,8 @@ namespace Oxide.Plugins
                             foreach (var connectedSpeaker in pasteData.ConnectedSpeakers) {
                                 if (connectedSpeaker.IsValid() && !connectedSpeaker.IsDestroyed)
                                 {
-                                    connectedSpeaker.SetFlag(BaseEntity.Flags.Reserved8, false);
-                                    connectedSpeaker.SetFlag(BaseEntity.Flags.Reserved8, true);
+                                    SetEntityFlag(connectedSpeaker, BaseEntity.Flags.Reserved8, false);
+                                    SetEntityFlag(connectedSpeaker, BaseEntity.Flags.Reserved8, true);
                                 }
                             }
                         }, 1f);
@@ -3427,7 +3694,7 @@ namespace Oxide.Plugins
             var industrialCrafter = entity as IndustrialCrafter;
             if (industrialCrafter != null)
             {
-                industrialCrafter.SetFlag(IndustrialCrafter.Crafting, false);
+                SetEntityFlag(industrialCrafter, IndustrialCrafter.Crafting, false);
             }
 
             if (data.ContainsKey("children"))
@@ -3604,6 +3871,28 @@ namespace Oxide.Plugins
             pasteData.CallbackSpawned?.Invoke(entity);
         }
 
+        private static bool RestoreDoorAnimationFlagsBeforeSpawn(Door door, Dictionary<string, object> flags)
+        {
+            bool hasOpen = flags.TryGetValue(nameof(BaseEntity.Flags.Open), out object openValue);
+            bool hasReverseOpen = flags.TryGetValue(nameof(BaseEntity.Flags.Reserved1), out object reverseOpenValue);
+            if (!hasOpen && !hasReverseOpen)
+                return false;
+
+            // Initialize the animator in its saved pose instead of starting a door animation after spawn.
+            using (var updateFlags = door.StartSetFlags(BaseEntity.FlagsUpdateMode.SendNetworkUpdate))
+            {
+                if (hasOpen)
+                    updateFlags.Set(BaseEntity.Flags.Open, Convert.ToBoolean(openValue));
+
+                if (hasReverseOpen)
+                    updateFlags.Set(Door.ReverseOpen, Convert.ToBoolean(reverseOpenValue));
+
+                updateFlags.Set(BaseEntity.Flags.Busy, false);
+            }
+
+            return true;
+        }
+
         private bool ShouldInvokeOnDeployed(BaseEntity entity)
         {
             if (entity is CustomDoorManipulator
@@ -3640,9 +3929,9 @@ namespace Oxide.Plugins
                     if (!sprinkler.IsValid() || sprinkler.IsDestroyed || !sprinkler.IsOn())
                         return;
 
-                    // Clear the on flag and rerun sprinkler startup so DoSplash is invoked without clearing fuel state
-                    sprinkler.SetFlag(BaseEntity.Flags.On, false);
-                    sprinkler.TurnOn();
+                    // Restart the splash callback, then recalculate the rebuilt fluid circuit.
+                    sprinkler.RefreshSprinklerState();
+                    sprinkler.SendChangedToRoot(forceUpdate: true);
                 });
             }
 
@@ -3674,7 +3963,7 @@ namespace Oxide.Plugins
                 timerSwitch.timerLength = Convert.ToSingle(ioData["timerLength"]);
                 if(timerSwitch.IsOn())
                 {
-                    timerSwitch.SetFlag(BaseEntity.Flags.On, false);
+                    SetEntityFlag(timerSwitch, BaseEntity.Flags.On, false);
                     timerSwitch.SwitchPressed();
                 }
             }
@@ -4089,8 +4378,10 @@ namespace Oxide.Plugins
             foreach (var itemDef in items)
             {
                 var item = itemDef as Dictionary<string, object>;
-                var itemid = Convert.ToInt32(item["id"]);
-                var itemskin = item.ContainsKey("skinid") ? FilterSkinId(pasteData, ulong.Parse(item["skinid"].ToString())) : 0;
+                var itemid = item.TryGetValue("id", out getObj) ? Convert.ToInt32(getObj) : 0;
+                var itemskin = item.TryGetValue("skinid", out getObj)
+                    ? FilterSkinId(pasteData, Convert.ToUInt64(getObj))
+                    : 0;
 
                 var def = ItemManager.FindItemDefinition(itemid);
                 if (!pasteData.Dlc && itemid != 0 && _dlcItemIds.Contains(itemid))
@@ -4110,8 +4401,8 @@ namespace Oxide.Plugins
                     }
                 }
 
-                var itemamount = Convert.ToInt32(item["amount"]);
-                var dataInt = item.ContainsKey("dataInt") ? Convert.ToInt32(item["dataInt"]) : 0;
+                var itemamount = item.TryGetValue("amount", out getObj) ? Convert.ToInt32(getObj) : 0;
+                var dataInt = item.TryGetValue("dataInt", out getObj) ? Convert.ToInt32(getObj) : 0;
                 var dataFloat = item.TryGetValue("dataFloat", out getObj) ? Convert.ToSingle(getObj) : 0f;
 
                 if (itemid == 0 || itemamount == 0)
@@ -4167,7 +4458,8 @@ namespace Oxide.Plugins
 
                 if (i != null)
                 {
-                    if (i.hasCondition)
+                    // ItemModFoodSpoiling handles condition using dataFloat, setting condition here can result in broken stacks and spoiled time remaining
+                    if (i.hasCondition && i.info != null && !i.info.HasComponent<ItemModFoodSpoiling>())
                     {
                         if (item.TryGetValue("maxCondition", out getObj))
                         {
@@ -4232,7 +4524,7 @@ namespace Oxide.Plugins
                     {
                         // Needs to be processed after all of the children are spawned
                         var oldId = Convert.ToUInt64(item["subEntity"]);
-                        if (oldId != 0)
+                        if (oldId != 0 && !pasteData.ItemsWithSubEntity.ContainsKey(oldId))
                             pasteData.ItemsWithSubEntity.Add(oldId, i);
                     }
 
@@ -4346,9 +4638,11 @@ namespace Oxide.Plugins
 
                     if (entity is WaterCatcher waterCatcher)
                     {
+                        var info = i.info; // avoid possibility of a concurrency issue
+                        var amt = i.amount;
                         waterCatcher.Invoke(() => {
                             if (waterCatcher != null && !waterCatcher.IsDestroyed)
-                                waterCatcher.inventory.AddItem(i.info, i.amount);
+                                waterCatcher.inventory.AddItem(info, amt);
                         }, 1f);
                     }
                     else
@@ -4712,7 +5006,7 @@ namespace Oxide.Plugins
         private ValueTuple<object, PasteData> TryPaste(Vector3 startPos, string filename, IPlayer player,
             float rotationCorrection,
             string[] args, bool autoHeight = true, Action callback = null,
-            Action<BaseEntity> callbackSpawned = null)
+            Action<BaseEntity> callbackSpawned = null, int? loopMode = null)
         {
             var userId = player?.Id;
 
@@ -4890,7 +5184,7 @@ namespace Oxide.Plugins
 
             var pasteData = Paste(preloadData, protocol, ownership, startPos, player, stability, rotationCorrection,
                 autoHeight ? heightAdj : 0, auth, callback, callbackSpawned, filename, checkPlaced, enableSaving,
-                dlc, skinsMode);
+                dlc, skinsMode, loopMode);
 
             return new ValueTuple<object, PasteData>(true, pasteData);
         }
@@ -4940,7 +5234,7 @@ namespace Oxide.Plugins
                         }
                     }
 
-                    codeLock.SetFlag(BaseEntity.Flags.Locked, true);
+                    SetEntityFlag(codeLock, BaseEntity.Flags.Locked, true);
                 }
             }
             else if (entity.GetComponent<KeyLock>())
@@ -4959,7 +5253,7 @@ namespace Oxide.Plugins
                     {
                         keyLock.keyCode = code & 0x7F;
                         keyLock.firstKeyCreated = true;
-                        keyLock.SetFlag(BaseEntity.Flags.Locked, true);
+                        SetEntityFlag(keyLock, BaseEntity.Flags.Locked, true);
                     }
                 }
 
@@ -4971,6 +5265,12 @@ namespace Oxide.Plugins
                     keyLock.OwnerID = Convert.ToUInt64(data["ownerId"]);
                 }
             }
+        }
+
+        private void SetEntityFlag(BaseEntity entity, BaseEntity.Flags flag, bool state)
+        {
+            using BaseEntity.FlagsUpdateScope flagsUpdateScope = entity.StartSetFlags(BaseEntity.FlagsUpdateMode.SendNetworkUpdate);
+            flagsUpdateScope.Set(flag, state);
         }
         
         private List<BaseEntity> TryPasteSlots(BaseEntity ent, Dictionary<string, object> structure,
@@ -5257,15 +5557,23 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (!_lastPastes.ContainsKey(player.Id))
+            if (!_lastPastes.TryGetValue(player.Id, out var checkFrom))
             {
                 player.Reply(Lang("NO_PASTED_STRUCTURE", player.Id));
                 return;
             }
 
-            var entities = new HashSet<BaseEntity>(_lastPastes[player.Id].Pop().ToList());
+            LastPaste lastPaste = checkFrom.Pop();
 
-            UndoLoop(entities, player);
+            var undoData = new UndoData
+            {
+                EntitiesToUndo = lastPaste.Entities,
+                Player = player,
+                ExecutionMode = (LoopMode)_config.LoopExecution.Mode,
+                Filename = lastPaste.Filename
+            };
+
+            undoData.StartLoop(UndoLoop(undoData));
         }
 
         private static readonly Dictionary<string, string> ReplacePrefab = new Dictionary<string, string>
@@ -5789,6 +6097,14 @@ namespace Oxide.Plugins
                     }
                 },
                 {
+                    "PASTE_FAILED", new Dictionary<string, string>
+                    {
+                        { "en", "There was a problem pasting \"{0}\", see logs for more information" },
+                        { "ru", "Произошла ошибка при вставке \"{0}\", подробности смотрите в журналах" },
+                        { "nl", "Er is een probleem opgetreden bij het plakken van \"{0}\", zie de logs voor meer informatie" }
+                    }
+                },
+                {
                     "SYNTAX_COPY", new Dictionary<string, string>
                     {
                         {
@@ -5926,7 +6242,7 @@ namespace Oxide.Plugins
                 }
             };
 
-        public class CopyData
+        public class CopyData : LoopManager
         {
             public IPlayer Player;
             public BasePlayer BasePlayer;
@@ -5953,7 +6269,7 @@ namespace Oxide.Plugins
 #endif
         }
 
-        public class PasteData
+        public class PasteData : LoopManager
         {
             public ICollection<Dictionary<string, object>> Entities;
             public List<BaseEntity> PastedEntities = new List<BaseEntity>();
@@ -5986,6 +6302,7 @@ namespace Oxide.Plugins
             public bool EnableSaving = true;
             public bool Dlc = true;
             public SkinsMode SkinsMode = SkinsMode.AllSkins;
+            public PasteErrorMode PasteErrorMode = PasteErrorMode.Stop;
 
             public bool Cancelled = false;
 
@@ -5999,6 +6316,48 @@ namespace Oxide.Plugins
 #if DEBUG
             public Stopwatch Sw = new Stopwatch();
 #endif
+        }
+
+        public class UndoData : LoopManager
+        {
+            public List<BaseEntity> EntitiesToUndo;
+            public IPlayer Player;
+            public string Filename;
+        }
+
+        public class LoopManager
+        {
+            public LoopMode ExecutionMode = LoopMode.TimedDelay;
+
+            public void StartLoop(IEnumerator iEnumerator)
+            {
+                if (ExecutionMode == LoopMode.Instant)
+                {
+                    while (iEnumerator.MoveNext()) { }
+                }
+                else
+                {
+                    ServerMgr.Instance.StartCoroutine(iEnumerator);
+                }
+            }
+
+            public bool TryGetBatchYield(float batchWait, out object batchYield)
+            {
+                if (ExecutionMode == LoopMode.TimedDelay)
+                {
+                    batchYield = CoroutineEx.waitForSeconds(batchWait);
+                    return true;
+                }
+
+                if (ExecutionMode == LoopMode.PerFrame)
+                {
+                    batchYield = null;
+                    return true;
+                }
+
+                batchYield = null;
+                return false;
+            }
         }
 
         public class PlayerBoatData
